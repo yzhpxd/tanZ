@@ -48,7 +48,24 @@ EOF
 
 # --- 2. 安装客户端 ---
 elif [ "$choice" == "2" ]; then
-    read -p "请输入主控地址 (如 https://vps.666200.xyz): " SERVER_URL
+    # 【智能交互升级】提示语更精简，只需输入域名
+    read -p "请输入主控域名 (直接输入 v.666200.xyz 即可): " RAW_INPUT
+    
+    if [ -z "$RAW_INPUT" ]; then
+        echo -e "${RED}[-] 域名不能为空！${PLAIN}"
+        exit 1
+    fi
+
+    # 【核心升级 4】智能清洗与地址补全逻辑
+    # 1. 剥离可能手误输入的 http:// 或 https://
+    CLEAN_URL=$(echo "$RAW_INPUT" | sed -e 's|^http://||' -e 's|^https://||')
+    # 2. 剥离可能手误输入的末尾 / 或 /report
+    CLEAN_URL=$(echo "$CLEAN_URL" | sed -e 's|/report/*$||' -e 's|/*$||')
+    # 3. 强制拼接成服务端唯一认证的格式
+    SERVER_URL="https://${CLEAN_URL}/report"
+    
+    echo -e "${GREEN}[*] 自动解析并补全上报接口为: ${SERVER_URL}${PLAIN}"
+    
     INSTALL_DIR="/home/agent"
     
     # 【核心升级 1】引入最严格的旧环境清理逻辑，彻底杜绝 ID 冲突和隐身问题
@@ -84,7 +101,7 @@ Type=simple
 User=monitor
 Group=monitor
 WorkingDirectory=$INSTALL_DIR
-# 【核心升级 3】给变量加上双引号，防止输入地址时带有空格导致命令截断报错
+# 【核心升级 3】双引号包裹最终生成的绝对路径
 ExecStart=$INSTALL_DIR/tz-agent -server "$SERVER_URL"
 Restart=always
 RestartSec=5
