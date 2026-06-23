@@ -49,7 +49,7 @@ EOF
 # --- 2. 安装客户端 ---
 elif [ "$choice" == "2" ]; then
     # 【智能交互升级】提示语更精简，只需输入域名
-    read -p "请输入主控域名 (直接输入 v.666200.xyz 即可): " RAW_INPUT
+    read -p "请输入主控域名 (如: v.666200.xyz 即可): " RAW_INPUT
     
     if [ -z "$RAW_INPUT" ]; then
         echo -e "${RED}[-] 域名不能为空！${PLAIN}"
