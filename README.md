@@ -1,3 +1,6 @@
+<img width="1530" height="638" alt="image" src="https://github.com/user-attachments/assets/98738f30-50c1-4818-90fc-52cc53f90517" />
+
+
 轻量化服务器探针
 是一个极其轻量、安全且专注于服务器状态监控的开源探针。我们追求“极简”，只保留最核心的性能指标，让运维回归本质。
 
