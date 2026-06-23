@@ -25,6 +25,7 @@ CPU 使用率
 
 快速开始
 Linux 部署 (推荐)
+```
 curl -o install.sh https://raw.githubusercontent.com/yzhpxd/tanz/main/static/install.sh && bash install.sh
 
 windowns 部署 (推荐)
