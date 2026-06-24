@@ -26,9 +26,9 @@ import (
 type NodeInfo struct {
 	NodeID      string  `json:"node_id"`
 	DisplayName string  `json:"-"`
-	IP          string  `json:"-"` 
-	IPv4        string  `json:"ipv4"` 
-	IPv6        string  `json:"ipv6"` 
+	IP          string  `json:"-"`
+	IPv4        string  `json:"ipv4"`
+	IPv6        string  `json:"ipv6"`
 	CPUUsage    float64 `json:"cpu_usage"`
 	MemUsage    float64 `json:"mem_usage"`
 	DiskUsage   float64 `json:"disk_usage"`
@@ -46,24 +46,29 @@ type PageData struct {
 	AdminUser  string
 	TOTPSecret string
 	SiteName   string
-	CustomCode string 
-	Favicon    string // [新增] 用于渲染网站图标
+	CustomCode string
+	Favicon    string
 }
 
 type AdminConfig struct {
 	Username      string `json:"username"`
-	PasswordHash  string `json:"password_hash"`  
-	TOTPEncrypted string `json:"totp_encrypted"` 
+	PasswordHash  string `json:"password_hash"`
+	TOTPEncrypted string `json:"totp_encrypted"`
 	SiteName      string `json:"site_name"`
-	CustomCode    string `json:"custom_code"` 
-	Favicon       string `json:"favicon"` // [新增] 存储 Base64 格式的图标数据
+	CustomCode    string `json:"custom_code"`
+	Favicon       string `json:"favicon"`
 }
 
 type LoginData struct {
 	Error    string
 	Has2FA   bool
 	SiteName string
-	Favicon  string // [新增] 登录页也需要图标
+	Favicon  string
+}
+
+type SecretConfig struct {
+	SessionToken string `json:"session_token"`
+	AESKey       string `json:"aes_key"`
 }
 
 var (
@@ -76,22 +81,68 @@ var (
 	configFile  = "config.json"
 	config      AdminConfig
 
-	sessionAuthToken = "TzAdminAuthenticatedTokenSecret_v3"
-	aesSecretKey     = []byte("TanzhengSafeKey12345678901234567")
+	sessionAuthToken string
+	aesSecretKey     []byte
 )
 
 // ==========================================
-// 🔒 加密与哈希算法区
+// 🔒 安全与加密算法区
 // ==========================================
+
+func loadSecrets() {
+	b, err := os.ReadFile("secret.json")
+	if err != nil {
+		fmt.Println("初始化: 未找到 secret.json，正在自动生成安全密钥...")
+		aesBytes := make([]byte, 16)
+		rand.Read(aesBytes)
+		newAESKey := hex.EncodeToString(aesBytes)
+
+		tokenBytes := make([]byte, 24)
+		rand.Read(tokenBytes)
+		newSessionToken := "TzSession_" + hex.EncodeToString(tokenBytes)
+
+		sec := SecretConfig{
+			SessionToken: newSessionToken,
+			AESKey:       newAESKey,
+		}
+
+		fileData, _ := json.MarshalIndent(sec, "", "  ")
+		if err := os.WriteFile("secret.json", fileData, 0600); err != nil {
+			fmt.Printf("🚨 严重警告: 无法保存 secret.json，请检查目录权限！(%v)\n", err)
+			os.Exit(1)
+		}
+
+		sessionAuthToken = sec.SessionToken
+		aesSecretKey = []byte(sec.AESKey)
+		fmt.Println("✅ 安全密钥自动生成完毕！")
+		return
+	}
+
+	var sec SecretConfig
+	err = json.Unmarshal(b, &sec)
+	if err != nil {
+		fmt.Println("🚨 严重警告: secret.json 格式错误！请删除文件让其重新生成。")
+		os.Exit(1)
+	}
+	if len(sec.AESKey) != 32 {
+		fmt.Printf("🚨 严重警告: aes_key 长度必须是 32 字节，当前长度为 %d！请删除 secret.json 让程序重新生成。\n", len(sec.AESKey))
+		os.Exit(1)
+	}
+
+	sessionAuthToken = sec.SessionToken
+	aesSecretKey = []byte(sec.AESKey)
+}
 
 func hashPassword(plain string) string {
 	h := sha256.New()
-	h.Write([]byte(plain + "tz_salt_9982")) 
+	h.Write([]byte(plain + "tz_salt_9982"))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
 func encryptAES(text string) string {
-	if text == "" { return "" }
+	if text == "" {
+		return ""
+	}
 	c, _ := aes.NewCipher(aesSecretKey)
 	gcm, _ := cipher.NewGCM(c)
 	nonce := make([]byte, gcm.NonceSize())
@@ -101,16 +152,24 @@ func encryptAES(text string) string {
 }
 
 func decryptAES(cryptoText string) string {
-	if cryptoText == "" { return "" }
+	if cryptoText == "" {
+		return ""
+	}
 	data, err := base64.StdEncoding.DecodeString(cryptoText)
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	c, _ := aes.NewCipher(aesSecretKey)
 	gcm, _ := cipher.NewGCM(c)
 	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize { return "" }
+	if len(data) < nonceSize {
+		return ""
+	}
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	return string(plain)
 }
 
@@ -120,17 +179,20 @@ func loadConfig() {
 		json.Unmarshal(b, &config)
 	} else {
 		config = AdminConfig{
-			Username:      "admin", 
-			PasswordHash:  hashPassword("admin"), 
-			TOTPEncrypted: "", 
+			Username:      "admin",
+			PasswordHash:  hashPassword("admin"),
+			TOTPEncrypted: "",
 			SiteName:      "服务器状态监控",
-			CustomCode:    "", 
-			Favicon:       "", // 初始化图标为空
+			CustomCode:    "",
+			Favicon:       "",
 		}
 		saveConfig()
 	}
-	if config.SiteName == "" { config.SiteName = "服务器状态监控" }
+	if config.SiteName == "" {
+		config.SiteName = "服务器状态监控"
+	}
 }
+
 func saveConfig() { b, _ := json.MarshalIndent(config, "", "  "); os.WriteFile(configFile, b, 0644) }
 func loadNames() { b, err := os.ReadFile(namesFile); if err == nil { json.Unmarshal(b, &customNames) } }
 func saveNames() { b, _ := json.Marshal(customNames); os.WriteFile(namesFile, b, 0644) }
@@ -230,6 +292,7 @@ const htmlTemplate = `
         </h2>
         <div class="header-actions">
             {{if .IsAdmin}} 
+                <button class="btn-delete" onclick="batchDelete()" style="padding: 6px 14px; font-size: 0.95em;">🗑️ 批量删除</button>
                 <button class="action-btn" onclick="copyAllIPs()">📄 复制全部IP</button>
                 <button class="login-btn settings" onclick="openSettings()">⚙️ 系统设置</button>
                 <a href="/logout" class="login-btn logout">退出管理</a> 
@@ -241,6 +304,7 @@ const htmlTemplate = `
     <table>
         <thead>
             <tr>
+                {{if .IsAdmin}}<th style="width: 30px; text-align: center;"><input type="checkbox" id="selectAll" onclick="toggleSelectAll(this)" title="全选/取消全选"></th>{{end}}
                 <th>排序</th>
                 <th>节点名称</th>
                 <th>IP 地址</th>
@@ -257,6 +321,9 @@ const htmlTemplate = `
         <tbody id="table-body">
         {{range $index, $info := .Nodes}}
         <tr class="draggable-row" {{if $.IsAdmin}}draggable="true"{{else}}draggable="false"{{end}} data-id="{{.NodeID}}" data-ip="{{if .IPv4}}{{.IPv4}}{{else}}{{.IP}}{{end}}">
+            
+            {{if $.IsAdmin}}<td style="text-align: center;"><input type="checkbox" class="node-cb" value="{{.NodeID}}" onclick="onCheckboxClick()"></td>{{end}}
+            
             <td>
                 <span class="seq-num">{{inc $index}}</span>
                 {{if $.IsAdmin}}<span class="drag-handle" title="按住拖拽排序">☰</span>{{end}}
@@ -323,37 +390,97 @@ const htmlTemplate = `
     <script>
         let refreshTimer = setTimeout(() => window.location.reload(), 5000);
         
+        // [新增] 专门用于彻底暂停刷新的函数
+        function killRefresh() {
+            if(refreshTimer) {
+                clearTimeout(refreshTimer);
+                refreshTimer = null; // 确保彻底清空
+            }
+        }
+
+        // [新增] 恢复定时刷新
+        function resumeRefresh() {
+            killRefresh();
+            refreshTimer = setTimeout(() => window.location.reload(), 5000);
+        }
+
+        {{if .IsAdmin}}
+        // [新增] 全选/取消全选 逻辑
+        function toggleSelectAll(source) {
+            killRefresh(); // 一旦操作选择框，立刻停止页面刷新！
+            let checkboxes = document.querySelectorAll('.node-cb');
+            checkboxes.forEach(cb => { cb.checked = source.checked; });
+        }
+
+        // [新增] 单个复选框点击 逻辑
+        function onCheckboxClick() {
+            killRefresh(); // 一旦操作选择框，立刻停止页面刷新！
+            let allChecked = true;
+            document.querySelectorAll('.node-cb').forEach(cb => {
+                if (!cb.checked) allChecked = false;
+            });
+            document.getElementById('selectAll').checked = allChecked;
+        }
+
+        // [新增] 批量删除提交 逻辑
+        function batchDelete() {
+            killRefresh();
+            let selected = [];
+            document.querySelectorAll('.node-cb:checked').forEach(cb => {
+                selected.push(cb.value);
+            });
+
+            if (selected.length === 0) {
+                alert("请先勾选要删除的节点！");
+                resumeRefresh(); // 没选东西的话，提示完恢复自动刷新
+                return;
+            }
+
+            if (confirm("确定要批量删除选中的 " + selected.length + " 个节点吗？\n(若客户端仍在运行，下次上报时会自动重新添加)")) {
+                fetch('/batch_delete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(selected)
+                }).then(res => {
+                    if(res.status === 401) { alert("操作失败：未登录或登录已失效！"); }
+                    window.location.reload();
+                });
+            } else {
+                resumeRefresh(); // 用户点了取消，恢复自动刷新
+            }
+        }
+        {{end}}
+        
         function renameNode(id, oldName) {
-            clearTimeout(refreshTimer);
+            killRefresh();
             let newName = prompt("请输入新的节点名称 (留空则恢复默认标识):", oldName);
             if (newName !== null) {
                 fetch('/rename', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'id=' + encodeURIComponent(id) + '&name=' + encodeURIComponent(newName) })
                 .then(res => { if(res.status === 401) { alert("未登录或登录已失效！"); } window.location.reload(); });
-            } else { refreshTimer = setTimeout(() => window.location.reload(), 5000); }
+            } else { resumeRefresh(); }
         }
 
         function deleteNode(id, name) {
-            clearTimeout(refreshTimer);
+            killRefresh();
             if(confirm("确定要删除节点 [" + name + "] 吗？\n(若客户端仍在运行，下次上报时会自动重新添加)")) {
                 fetch('/delete', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'id=' + encodeURIComponent(id) })
                 .then(res => { if(res.status === 401) { alert("操作失败：未登录或登录已失效！"); } window.location.reload(); });
-            } else { refreshTimer = setTimeout(() => window.location.reload(), 5000); }
+            } else { resumeRefresh(); }
         }
 
         function copyIP(ip, btn) {
-            clearTimeout(refreshTimer);
+            killRefresh();
             let textArea = document.createElement("textarea"); textArea.value = ip; textArea.style.position = "fixed"; textArea.style.opacity = "0"; document.body.appendChild(textArea); textArea.focus(); textArea.select();
             try { document.execCommand('copy'); let oldText = btn.innerText; btn.innerText = "已复制!"; btn.style.backgroundColor = "#4caf50"; btn.style.color = "white"; btn.style.borderColor = "#4caf50";
-                setTimeout(() => { btn.innerText = oldText; btn.style.backgroundColor = "#fff"; btn.style.color = "#555"; btn.style.borderColor = "#ccc"; refreshTimer = setTimeout(() => window.location.reload(), 5000); }, 1500);
-            } catch (err) { alert("复制失败"); refreshTimer = setTimeout(() => window.location.reload(), 5000); }
+                setTimeout(() => { btn.innerText = oldText; btn.style.backgroundColor = "#fff"; btn.style.color = "#555"; btn.style.borderColor = "#ccc"; resumeRefresh(); }, 1500);
+            } catch (err) { alert("复制失败"); resumeRefresh(); }
             document.body.removeChild(textArea);
         }
 
         {{if .IsAdmin}}
-        function openSettings() { clearTimeout(refreshTimer); document.getElementById('settingsModal').style.display = 'flex'; }
-        function closeSettings() { document.getElementById('settingsModal').style.display = 'none'; refreshTimer = setTimeout(() => window.location.reload(), 5000); }
+        function openSettings() { killRefresh(); document.getElementById('settingsModal').style.display = 'flex'; }
+        function closeSettings() { document.getElementById('settingsModal').style.display = 'none'; resumeRefresh(); }
 
-        // 【新增】异步提交设置，处理图片文件转换
         async function submitSettingsAsync() {
             let s = document.getElementById('cfgSiteName').value;
             let u = document.getElementById('cfgUser').value;
@@ -361,16 +488,14 @@ const htmlTemplate = `
             let t = document.getElementById('cfgTOTP').value;
             let c = document.getElementById('cfgCustomCode').value;
 
-            // 处理图片上传
             let fileInput = document.getElementById('cfgFavicon');
             let favBase64 = "";
             if (fileInput.files.length > 0) {
                 let file = fileInput.files[0];
-                if (file.size > 500 * 1024) { // 限制 500KB 以内，防止挤爆配置文件
+                if (file.size > 500 * 1024) { 
                     alert("图标文件过大！请选择 500KB 以下的图片文件。");
                     return;
                 }
-                // 将文件读取为 Base64 数据字符串
                 favBase64 = await new Promise((resolve) => {
                     let reader = new FileReader();
                     reader.onload = (e) => resolve(e.target.result);
@@ -378,7 +503,6 @@ const htmlTemplate = `
                 });
             }
 
-            // 使用 URLSearchParams 组装参数，自动处理 URL 安全编码
             let params = new URLSearchParams();
             params.append('site_name', s);
             params.append('username', u);
@@ -404,25 +528,25 @@ const htmlTemplate = `
         }
 
         function copyAllIPs() {
-            clearTimeout(refreshTimer);
+            killRefresh();
             let ips = [];
             document.querySelectorAll('.draggable-row').forEach(row => {
                 let ip = row.getAttribute('data-ip');
                 if(ip && ip !== "") { ips.push(ip); }
             });
-            if(ips.length === 0) { alert("没有找到可复制的 IP"); refreshTimer = setTimeout(() => window.location.reload(), 5000); return; }
+            if(ips.length === 0) { alert("没有找到可复制的 IP"); resumeRefresh(); return; }
             let text = ips.join("\n");
             let textArea = document.createElement("textarea"); textArea.value = text; textArea.style.position = "fixed"; textArea.style.opacity = "0"; document.body.appendChild(textArea); textArea.focus(); textArea.select();
             try { document.execCommand('copy'); alert("成功复制 " + ips.length + " 个 IP 地址！"); } catch (err) { alert("复制失败"); }
             document.body.removeChild(textArea);
-            refreshTimer = setTimeout(() => window.location.reload(), 5000);
+            resumeRefresh();
         }
 
         let draggedRow = null;
         document.querySelectorAll('.draggable-row').forEach(row => {
-            row.addEventListener('dragstart', function(e) { draggedRow = this; e.dataTransfer.effectAllowed = 'move'; clearTimeout(refreshTimer); setTimeout(() => this.classList.add('dragging'), 0); });
+            row.addEventListener('dragstart', function(e) { draggedRow = this; e.dataTransfer.effectAllowed = 'move'; killRefresh(); setTimeout(() => this.classList.add('dragging'), 0); });
             row.addEventListener('dragend', function() { this.classList.remove('dragging'); let newOrder = Array.from(document.querySelectorAll('.draggable-row')).map(r => r.getAttribute('data-id'));
-                fetch('/update_order', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(newOrder) }).then(res => { if(res.status === 401) alert("操作失败：未登录！"); refreshTimer = setTimeout(() => window.location.reload(), 5000); });
+                fetch('/update_order', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(newOrder) }).then(res => { if(res.status === 401) alert("操作失败：未登录！"); resumeRefresh(); });
             });
             row.addEventListener('dragover', function(e) { e.preventDefault(); if (draggedRow === this) return; let bounding = this.getBoundingClientRect(); let offset = e.clientY - bounding.top;
                 if (offset > bounding.height / 2) { this.parentNode.insertBefore(draggedRow, this.nextSibling); } else { this.parentNode.insertBefore(draggedRow, this); }
@@ -490,13 +614,15 @@ const loginTemplate = `
 // ==========================================
 
 func main() {
-	loadConfig() 
+	loadSecrets()
+	loadConfig()
 	loadNames()
 	loadOrder()
 
 	http.HandleFunc("/report", handleReport)
 	http.HandleFunc("/rename", handleRename)
 	http.HandleFunc("/delete", handleDelete)
+	http.HandleFunc("/batch_delete", handleBatchDelete) // [新增] 批量删除接口
 	http.HandleFunc("/update_order", handleUpdateOrder)
 	http.HandleFunc("/update_config", handleUpdateConfig)
 	http.HandleFunc("/login", handleLogin)
@@ -507,7 +633,9 @@ func main() {
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
 
 	fmt.Println("探针主控端已启动，监听端口 :5001 ...")
-	if err := http.ListenAndServe(":5001", nil); err != nil { fmt.Printf("启动失败: %v\n", err) }
+	if err := http.ListenAndServe(":5001", nil); err != nil {
+		fmt.Printf("启动失败: %v\n", err)
+	}
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -522,7 +650,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	has2FA := sysTOTPDecrypted != ""
 
 	if r.Method == http.MethodGet {
-		// 【智能模板加载】如果存在 theme-login.html，也可以读取外部文件（这里简单处理，只读内置）
 		tmpl, _ := template.New("login").Parse(loginTemplate)
 		tmpl.Execute(w, LoginData{Has2FA: has2FA, SiteName: sysName, Favicon: sysFavicon})
 		return
@@ -532,7 +659,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		user := r.FormValue("username")
 		pass := r.FormValue("password")
 		code := r.FormValue("totp")
-		
+
 		code = strings.ReplaceAll(code, " ", "")
 
 		if user == sysUser && hashPassword(pass) == sysPassHash {
@@ -543,7 +670,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			http.SetCookie(w, &http.Cookie{ Name: "admin_session", Value: sessionAuthToken, Path: "/", HttpOnly: true, MaxAge: 86400 })
+			http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: sessionAuthToken, Path: "/", HttpOnly: true, MaxAge: 86400})
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
@@ -553,18 +680,30 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{ Name: "admin_session", Value: "", Path: "/", MaxAge: -1 })
+	http.SetCookie(w, &http.Cookie{Name: "admin_session", Value: "", Path: "/", MaxAge: -1})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func handleReport(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { return }
-	var data NodeInfo; json.NewDecoder(r.Body).Decode(&data)
-	data.Timestamp = time.Now().Unix(); data.LastSeen = time.Now().Format("15:04:05")
-	
+	if r.Method != http.MethodPost {
+		return
+	}
+	var data NodeInfo
+	json.NewDecoder(r.Body).Decode(&data)
+	data.Timestamp = time.Now().Unix()
+	data.LastSeen = time.Now().Format("15:04:05")
+
 	clientIP := r.Header.Get("X-Real-IP")
-	if clientIP == "" { clientIP = r.Header.Get("X-Forwarded-For"); if clientIP != "" { clientIP = strings.Split(clientIP, ",")[0] ; clientIP = strings.TrimSpace(clientIP) } }
-	if clientIP == "" { clientIP, _, _ = net.SplitHostPort(r.RemoteAddr) }
+	if clientIP == "" {
+		clientIP = r.Header.Get("X-Forwarded-For")
+		if clientIP != "" {
+			clientIP = strings.Split(clientIP, ",")[0]
+			clientIP = strings.TrimSpace(clientIP)
+		}
+	}
+	if clientIP == "" {
+		clientIP, _, _ = net.SplitHostPort(r.RemoteAddr)
+	}
 	data.IP = clientIP
 
 	if data.IPv4 == "" && data.IPv6 == "" {
@@ -577,40 +716,114 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 
 	mu.Lock()
 	if _, exists := nodesStatus[data.NodeID]; !exists {
-		found := false; for _, id := range nodeOrder { if id == data.NodeID { found = true; break } }
-		if !found { nodeOrder = append(nodeOrder, data.NodeID); saveOrder() }
+		found := false
+		for _, id := range nodeOrder {
+			if id == data.NodeID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			nodeOrder = append(nodeOrder, data.NodeID)
+			saveOrder()
+		}
 	}
 	nodesStatus[data.NodeID] = &data
 	mu.Unlock()
-	
-	w.WriteHeader(http.StatusOK); w.Write([]byte(`{"status":"success"}`))
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"success"}`))
 }
 
 func handleRename(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { return }
-	if !checkAdminAuth(r) { w.WriteHeader(http.StatusUnauthorized); return }
-	
-	id := r.FormValue("id"); newName := r.FormValue("name")
-	if id != "" { 
+	if r.Method != http.MethodPost {
+		return
+	}
+	if !checkAdminAuth(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	id := r.FormValue("id")
+	newName := r.FormValue("name")
+	if id != "" {
 		mu.Lock()
-		if newName == "" { delete(customNames, id) } else { customNames[id] = newName }
+		if newName == "" {
+			delete(customNames, id)
+		} else {
+			customNames[id] = newName
+		}
 		saveNames()
-		mu.Unlock() 
+		mu.Unlock()
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { return }
-	if !checkAdminAuth(r) { w.WriteHeader(http.StatusUnauthorized); return }
+	if r.Method != http.MethodPost {
+		return
+	}
+	if !checkAdminAuth(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 
 	id := r.FormValue("id")
 	if id != "" {
 		mu.Lock()
 		delete(nodesStatus, id)
-		if _, ok := customNames[id]; ok { delete(customNames, id); saveNames() }
+		if _, ok := customNames[id]; ok {
+			delete(customNames, id)
+			saveNames()
+		}
 		newOrder := make([]string, 0)
-		for _, v := range nodeOrder { if v != id { newOrder = append(newOrder, v) } }
+		for _, v := range nodeOrder {
+			if v != id {
+				newOrder = append(newOrder, v)
+			}
+		}
+		nodeOrder = newOrder
+		saveOrder()
+		mu.Unlock()
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// [新增] 专门处理批量删除的后端接口
+func handleBatchDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		return
+	}
+	if !checkAdminAuth(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	var ids []string
+	if err := json.NewDecoder(r.Body).Decode(&ids); err == nil {
+		mu.Lock()
+		for _, id := range ids {
+			delete(nodesStatus, id) // 从内存状态中移除
+			if _, ok := customNames[id]; ok {
+				delete(customNames, id) // 从自定义名称表中移除
+			}
+		}
+		saveNames()
+
+		// 重建排序列表，剔除被删掉的节点
+		newOrder := make([]string, 0)
+		for _, v := range nodeOrder {
+			keep := true
+			for _, id := range ids {
+				if v == id {
+					keep = false
+					break
+				}
+			}
+			if keep {
+				newOrder = append(newOrder, v)
+			}
+		}
 		nodeOrder = newOrder
 		saveOrder()
 		mu.Unlock()
@@ -619,47 +832,65 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpdateOrder(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { return }
-	if !checkAdminAuth(r) { w.WriteHeader(http.StatusUnauthorized); return }
-	
+	if r.Method != http.MethodPost {
+		return
+	}
+	if !checkAdminAuth(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	var newOrder []string
-	if err := json.NewDecoder(r.Body).Decode(&newOrder); err == nil { 
+	if err := json.NewDecoder(r.Body).Decode(&newOrder); err == nil {
 		mu.Lock()
-		if len(newOrder) > 0 { nodeOrder = newOrder; saveOrder() }
-		mu.Unlock() 
+		if len(newOrder) > 0 {
+			nodeOrder = newOrder
+			saveOrder()
+		}
+		mu.Unlock()
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost { return }
-	if !checkAdminAuth(r) { w.WriteHeader(http.StatusUnauthorized); return }
+	if r.Method != http.MethodPost {
+		return
+	}
+	if !checkAdminAuth(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 
 	newSite := r.FormValue("site_name")
 	newUser := r.FormValue("username")
 	newPass := r.FormValue("password")
 	newTOTP := strings.TrimSpace(r.FormValue("totp"))
 	newCustomCode := r.FormValue("custom_code")
-	newFavicon := r.FormValue("favicon") // 【新增】接收前端传过来的 Base64 图标数据
+	newFavicon := r.FormValue("favicon")
 
 	mu.Lock()
-	if newSite != "" { config.SiteName = newSite }
-	if newUser != "" { config.Username = newUser }
-	if newPass != "" { config.PasswordHash = hashPassword(newPass) }
-	
-	if newTOTP != "" { 
-		config.TOTPEncrypted = encryptAES(newTOTP) 
+	if newSite != "" {
+		config.SiteName = newSite
+	}
+	if newUser != "" {
+		config.Username = newUser
+	}
+	if newPass != "" {
+		config.PasswordHash = hashPassword(newPass)
+	}
+
+	if newTOTP != "" {
+		config.TOTPEncrypted = encryptAES(newTOTP)
 	} else {
 		config.TOTPEncrypted = ""
 	}
-	
+
 	config.CustomCode = newCustomCode
-	
-	// 如果用户上传了新图标才更新，否则保留原有图标
+
 	if newFavicon != "" {
 		config.Favicon = newFavicon
 	}
-	
+
 	saveConfig()
 	mu.Unlock()
 
@@ -667,67 +898,93 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" { http.NotFound(w, r); return }
-	
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
 	mu.Lock()
 	now := time.Now().Unix()
 	var list []*NodeInfo
 	processed := make(map[string]bool)
-	
+
 	for _, id := range nodeOrder {
 		if info, exists := nodesStatus[id]; exists {
-			if now-info.Timestamp > 15 { info.IsOnline = false } else { info.IsOnline = true }
-			if name, ok := customNames[id]; ok { info.DisplayName = name } else { info.DisplayName = id }
-			list = append(list, info); processed[id] = true
+			if now-info.Timestamp > 15 {
+				info.IsOnline = false
+			} else {
+				info.IsOnline = true
+			}
+			if name, ok := customNames[id]; ok {
+				info.DisplayName = name
+			} else {
+				info.DisplayName = id
+			}
+			list = append(list, info)
+			processed[id] = true
 		}
 	}
 	for id, info := range nodesStatus {
 		if !processed[id] {
-			if now-info.Timestamp > 15 { info.IsOnline = false } else { info.IsOnline = true }
-			if name, ok := customNames[id]; ok { info.DisplayName = name } else { info.DisplayName = id }
-			list = append(list, info); nodeOrder = append(nodeOrder, id); saveOrder()
+			if now-info.Timestamp > 15 {
+				info.IsOnline = false
+			} else {
+				info.IsOnline = true
+			}
+			if name, ok := customNames[id]; ok {
+				info.DisplayName = name
+			} else {
+				info.DisplayName = id
+			}
+			list = append(list, info)
+			nodeOrder = append(nodeOrder, id)
+			saveOrder()
 		}
 	}
-	
+
 	adminUser := config.Username
 	siteName := config.SiteName
 	totpSecretDecrypted := decryptAES(config.TOTPEncrypted)
 	customCode := config.CustomCode
 	sysFavicon := config.Favicon
 	mu.Unlock()
-	
-	pageData := PageData{ 
-		Nodes: list, 
-		IsAdmin: checkAdminAuth(r),
-		AdminUser: adminUser,
+
+	pageData := PageData{
+		Nodes:      list,
+		IsAdmin:    checkAdminAuth(r),
+		AdminUser:  adminUser,
 		TOTPSecret: totpSecretDecrypted,
-		SiteName: siteName,
-		CustomCode: customCode, 
-		Favicon: sysFavicon, // 将图标传给前端
+		SiteName:   siteName,
+		CustomCode: customCode,
+		Favicon:    sysFavicon,
 	}
-	
-	// 初始化模板函数
-	tmpl := template.New("index").Funcs(template.FuncMap{ 
-		"div": func(b uint64) float64 { return float64(b) / 1024 / 1024 }, 
+
+	tmpl := template.New("index").Funcs(template.FuncMap{
+		"div": func(b uint64) float64 { return float64(b) / 1024 / 1024 },
 		"inc": func(i int) int { return i + 1 },
 		"formatUptime": func(u uint64) string {
-			if u == 0 { return "-" }
+			if u == 0 {
+				return "-"
+			}
 			days := u / 86400
 			hours := (u % 86400) / 3600
 			mins := (u % 3600) / 60
-			if days > 0 { return fmt.Sprintf("%d天 %d时 %d分", days, hours, mins) }
-			if hours > 0 { return fmt.Sprintf("%d时 %d分", hours, mins) }
+			if days > 0 {
+				return fmt.Sprintf("%d天 %d时 %d分", days, hours, mins)
+			}
+			if hours > 0 {
+				return fmt.Sprintf("%d时 %d分", hours, mins)
+			}
 			return fmt.Sprintf("%d分", mins)
 		},
 		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
 	})
 
-	// 【超级智能升级】：优先读取外部 theme.html，如果文件被误删或者不存在，则自动降级使用内置界面！
 	if _, err := os.Stat("theme.html"); err == nil {
 		tmpl, _ = tmpl.ParseFiles("theme.html")
 	} else {
 		tmpl, _ = tmpl.Parse(htmlTemplate)
 	}
-	
+
 	tmpl.Execute(w, pageData)
 }
