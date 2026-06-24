@@ -26,7 +26,9 @@ import (
 type NodeInfo struct {
 	NodeID      string  `json:"node_id"`
 	DisplayName string  `json:"-"`
-	IP          string  `json:"-"`
+	IP          string  `json:"-"` // 保留作为连接 IP 备用
+	IPv4        string  `json:"ipv4"` // 新增：接收客户端上报的 IPv4
+	IPv6        string  `json:"ipv6"` // 新增：接收客户端上报的 IPv6
 	CPUUsage    float64 `json:"cpu_usage"`
 	MemUsage    float64 `json:"mem_usage"`
 	DiskUsage   float64 `json:"disk_usage"`
@@ -79,14 +81,12 @@ var (
 // 🔒 加密与哈希算法区
 // ==========================================
 
-// 将明文密码进行 SHA-256 哈希 (加盐防彩虹表)
 func hashPassword(plain string) string {
 	h := sha256.New()
 	h.Write([]byte(plain + "tz_salt_9982")) 
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// 使用 AES-256-GCM 加密 2FA 密钥
 func encryptAES(text string) string {
 	if text == "" { return "" }
 	c, _ := aes.NewCipher(aesSecretKey)
@@ -97,7 +97,6 @@ func encryptAES(text string) string {
 	return base64.StdEncoding.EncodeToString(sealed)
 }
 
-// 解密 2FA 密钥
 func decryptAES(cryptoText string) string {
 	if cryptoText == "" { return "" }
 	data, err := base64.StdEncoding.DecodeString(cryptoText)
@@ -112,13 +111,11 @@ func decryptAES(cryptoText string) string {
 	return string(plain)
 }
 
-// 持久化存储函数
 func loadConfig() {
 	b, err := os.ReadFile(configFile)
 	if err == nil {
 		json.Unmarshal(b, &config)
 	} else {
-		// 默认初始配置：密码 admin 会被转化为一串 Hash
 		config = AdminConfig{
 			Username:      "admin", 
 			PasswordHash:  hashPassword("admin"), 
@@ -135,14 +132,12 @@ func saveNames() { b, _ := json.Marshal(customNames); os.WriteFile(namesFile, b,
 func loadOrder() { b, err := os.ReadFile(orderFile); if err == nil { json.Unmarshal(b, &nodeOrder) } }
 func saveOrder() { b, _ := json.Marshal(nodeOrder); os.WriteFile(orderFile, b, 0644) }
 
-// 验证登录状态
 func checkAdminAuth(r *http.Request) bool {
 	cookie, err := r.Cookie("admin_session")
 	if err != nil { return false }
 	return cookie.Value == sessionAuthToken
 }
 
-// 🛡️ 纯原生 TOTP (2FA) 验证算法
 func verifyTOTP(secret string, userCode string) bool {
 	if secret == "" { return true }
 	secret = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(secret, " ", ""), "=", ""))
@@ -173,7 +168,6 @@ func generateTOTP(key []byte, t int64) string {
 // 📄 HTML 模板定义
 // ==========================================
 
-// 1. 主监控面板模板
 const htmlTemplate = `
 <!DOCTYPE html>
 <html>
@@ -249,13 +243,27 @@ const htmlTemplate = `
         </thead>
         <tbody id="table-body">
         {{range $index, $info := .Nodes}}
-        <tr class="draggable-row" {{if $.IsAdmin}}draggable="true"{{else}}draggable="false"{{end}} data-id="{{.NodeID}}" data-ip="{{.IP}}">
+        <tr class="draggable-row" {{if $.IsAdmin}}draggable="true"{{else}}draggable="false"{{end}} data-id="{{.NodeID}}" data-ip="{{if .IPv4}}{{.IPv4}}{{else}}{{.IP}}{{end}}">
             <td>
                 <span class="seq-num">{{inc $index}}</span>
                 {{if $.IsAdmin}}<span class="drag-handle" title="按住拖拽排序">☰</span>{{end}}
             </td>
             {{if $.IsAdmin}}<td class="editable" onclick="renameNode('{{.NodeID}}', '{{.DisplayName}}')" title="点击修改备注名">{{.DisplayName}}</td>{{else}}<td>{{.DisplayName}}</td>{{end}}
-            <td style="font-size: 0.95em; color: #444;">{{if $.IsAdmin}}{{.IP}} <button class="copy-btn" onclick="copyIP('{{.IP}}', this)">复制</button>{{else}}<span style="color:#aaa; font-style: italic;">*.*.*.* (登录可见)</span>{{end}}</td>
+            
+            <td style="font-size: 0.95em; color: #444;">
+                {{if $.IsAdmin}}
+                    <div style="display: flex; align-items: center;">
+                        <span>{{if .IPv4}}{{.IPv4}}{{else}}{{.IP}}{{end}}</span>
+                        <button class="copy-btn" onclick="copyIP('{{if .IPv4}}{{.IPv4}}{{else}}{{.IP}}{{end}}', this)">复制</button>
+                    </div>
+                    {{if .IPv6}}
+                        <div style="font-size: 12px; color: #888; margin-top: 4px; word-break: break-all;">{{.IPv6}}</div>
+                    {{end}}
+                {{else}}
+                    <span style="color:#aaa; font-style: italic;">*.*.*.* (登录可见)</span>
+                {{end}}
+            </td>
+
             <td>{{if .IsOnline}}<span class="online">在线</span>{{else}}<span class="offline">离线</span>{{end}}</td>
             <td style="font-size: 0.9em; color: #666;">{{formatUptime .Uptime}}</td>
             <td><div class="val-text">{{printf "%.1f" .CPUUsage}}%</div><div class="progress-bg"><div class="progress-bar" style="width: {{.CPUUsage}}%; background-color: {{if gt .CPUUsage 90.0}}#f44336{{else if gt .CPUUsage 70.0}}#ff9800{{else}}#4caf50{{end}};"></div></div></td>
@@ -401,7 +409,6 @@ const htmlTemplate = `
 </html>
 `
 
-// 2. 登录页面模板
 const loginTemplate = `
 <!DOCTYPE html>
 <html>
@@ -476,7 +483,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	sysUser := config.Username
 	sysPassHash := config.PasswordHash
-	sysTOTPDecrypted := decryptAES(config.TOTPEncrypted) // 登录时动态解密 2FA
+	sysTOTPDecrypted := decryptAES(config.TOTPEncrypted)
 	sysName := config.SiteName
 	mu.Unlock()
 
@@ -495,7 +502,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		
 		code = strings.ReplaceAll(code, " ", "")
 
-		// 将用户输入的密码也进行 Hash，与配置中的 Hash 值进行对比
 		if user == sysUser && hashPassword(pass) == sysPassHash {
 			if has2FA {
 				if !verifyTOTP(sysTOTPDecrypted, code) {
@@ -527,6 +533,16 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 	if clientIP == "" { clientIP = r.Header.Get("X-Forwarded-For"); if clientIP != "" { clientIP = strings.Split(clientIP, ",")[0] ; clientIP = strings.TrimSpace(clientIP) } }
 	if clientIP == "" { clientIP, _, _ = net.SplitHostPort(r.RemoteAddr) }
 	data.IP = clientIP
+
+	// 【新增核心兼容逻辑】：
+	// 如果旧版客户端没有传 IPv4 或 IPv6 字段，则尝试通过连接来源 IP 智能补全
+	if data.IPv4 == "" && data.IPv6 == "" {
+		if strings.Contains(clientIP, ":") {
+			data.IPv6 = clientIP // 有冒号说明是 IPv6
+		} else {
+			data.IPv4 = clientIP // 否则是 IPv4
+		}
+	}
 
 	mu.Lock()
 	if _, exists := nodesStatus[data.NodeID]; !exists {
@@ -584,7 +600,6 @@ func handleUpdateOrder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// 保存设置时，触发加密
 func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost { return }
 	if !checkAdminAuth(r) { w.WriteHeader(http.StatusUnauthorized); return }
@@ -597,10 +612,8 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	if newSite != "" { config.SiteName = newSite }
 	if newUser != "" { config.Username = newUser }
-	// 如果用户输入了新密码，将其哈希后再存储
 	if newPass != "" { config.PasswordHash = hashPassword(newPass) }
 	
-	// 更新 2FA 密钥，存入前进行 AES 加密
 	if newTOTP != "" { 
 		config.TOTPEncrypted = encryptAES(newTOTP) 
 	} else {
@@ -638,7 +651,6 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	
 	adminUser := config.Username
 	siteName := config.SiteName
-	// 传给前端用于显示的 2FA 密钥必须先解密，这样后台设置里才能看到之前配的字符串
 	totpSecretDecrypted := decryptAES(config.TOTPEncrypted)
 	mu.Unlock()
 	
