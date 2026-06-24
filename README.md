@@ -27,11 +27,14 @@ CPU 使用率
 系统运行时间 (Uptime)
 
 快速开始
+
+自己做个 ip:5001  的反代
+
 Linux 部署 (推荐)
 ```
 curl -o install.sh https://raw.githubusercontent.com/yzhpxd/tanZ/main/static/install.sh && bash install.sh
 ```
-windowns 部署 (推荐)
+windowns 部署 
 在 PowerShell (管理员模式) 中执行：
 ```
 Set-ExecutionPolicy Bypass -Scope Process -Force; irm https://raw.githubusercontent.com/yzhpxd/tanz/main/static/install.ps1 | iex
