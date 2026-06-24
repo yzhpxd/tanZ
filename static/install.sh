@@ -14,7 +14,9 @@ echo -e "  Tanzheng 探针自动化部署工具"
 echo -e "${GREEN}======================================${PLAIN}"
 echo "1. 安装主控服务端 (Server)"
 echo "2. 安装被控客户端 (Agent)"
-read -p "请选择安装类型 [1/2]: " choice
+echo "3. 升级主控服务端 (Update Server)"
+echo "4. 升级被控客户端 (Update Agent)"
+read -p "请选择操作 [1/2/3/4]: " choice
 
 # ==========================================
 # 核心升级：更严谨的系统架构判断
@@ -36,7 +38,6 @@ if [ "$choice" == "1" ]; then
     INSTALL_DIR="/home/mynetzheng"
     mkdir -p $INSTALL_DIR
     
-    # 这里会自动根据架构下载 tz-server-amd64 或 tz-server-arm64
     echo -e "${GREEN}[-] 正在检测并下载服务端 ($BIN_ARCH 架构)...${PLAIN}"
     wget -qO $INSTALL_DIR/tz-server "$BASE_URL/tz-server-$BIN_ARCH"
     chmod +x $INSTALL_DIR/tz-server
@@ -125,6 +126,64 @@ EOF
     else
         echo -e "${RED}[-] 启动失败，请运行 'journalctl -u tz-agent -n 20' 检查报错。${PLAIN}"
     fi
+
+# --- 3. 升级服务端 ---
+elif [ "$choice" == "3" ]; then
+    INSTALL_DIR="/home/mynetzheng"
+    if [ ! -f "/etc/systemd/system/tz-server.service" ]; then
+        echo -e "${RED}[-] 未检测到服务端配置，请先选择 1 进行全新安装！${PLAIN}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}[-] 正在停止服务端运行...${PLAIN}"
+    systemctl stop tz-server
+    
+    echo -e "${GREEN}[-] 正在从 GitHub 下载最新服务端 ($BIN_ARCH 架构)...${PLAIN}"
+    wget -qO $INSTALL_DIR/tz-server "$BASE_URL/tz-server-$BIN_ARCH"
+    chmod +x $INSTALL_DIR/tz-server
+    
+    echo -e "${GREEN}[-] 正在启动服务端...${PLAIN}"
+    systemctl restart tz-server
+    
+    if systemctl is-active --quiet tz-server; then
+        echo -e "${GREEN}[+] ==========================================${PLAIN}"
+        echo -e "${GREEN}[+] 服务端 ($BIN_ARCH) 升级成功并已自动重启！${PLAIN}"
+        echo -e "${GREEN}[+] 当前版本已更新为: $VERSION${PLAIN}"
+        echo -e "${GREEN}[+] ==========================================${PLAIN}"
+    else
+        echo -e "${RED}[-] 服务端重启失败，请检查日志。${PLAIN}"
+    fi
+
+# --- 4. 升级客户端 ---
+elif [ "$choice" == "4" ]; then
+    INSTALL_DIR="/home/agent"
+    if [ ! -f "/etc/systemd/system/tz-agent.service" ]; then
+        echo -e "${RED}[-] 未检测到客户端配置，请先选择 2 进行全新安装！${PLAIN}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}[-] 正在停止探针客户端运行...${PLAIN}"
+    systemctl stop tz-agent
+    
+    echo -e "${GREEN}[-] 正在从 GitHub 下载最新客户端 ($BIN_ARCH 架构)...${PLAIN}"
+    wget -qO $INSTALL_DIR/tz-agent "$BASE_URL/$AGENT_BIN"
+    chmod +x $INSTALL_DIR/tz-agent
+    
+    # 关键：升级后必须确保新下载的文件仍然属于 monitor 用户
+    chown -R monitor:monitor $INSTALL_DIR
+    
+    echo -e "${GREEN}[-] 正在启动探针客户端...${PLAIN}"
+    systemctl restart tz-agent
+    
+    if systemctl is-active --quiet tz-agent; then
+        echo -e "${GREEN}[+] ==========================================${PLAIN}"
+        echo -e "${GREEN}[+] 探针客户端升级成功并已自动重启！${PLAIN}"
+        echo -e "${GREEN}[+] 当前版本已更新为: $VERSION${PLAIN}"
+        echo -e "${GREEN}[+] ==========================================${PLAIN}"
+    else
+        echo -e "${RED}[-] 客户端重启失败，请运行 'journalctl -u tz-agent -n 20' 检查。${PLAIN}"
+    fi
+
 else
     echo -e "${RED}[-] 无效输入。${PLAIN}"
 fi
