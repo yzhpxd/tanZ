@@ -26,9 +26,9 @@ import (
 type NodeInfo struct {
 	NodeID      string  `json:"node_id"`
 	DisplayName string  `json:"-"`
-	IP          string  `json:"-"` // 保留作为连接 IP 备用
-	IPv4        string  `json:"ipv4"` // 新增：接收客户端上报的 IPv4
-	IPv6        string  `json:"ipv6"` // 新增：接收客户端上报的 IPv6
+	IP          string  `json:"-"` 
+	IPv4        string  `json:"ipv4"` 
+	IPv6        string  `json:"ipv6"` 
 	CPUUsage    float64 `json:"cpu_usage"`
 	MemUsage    float64 `json:"mem_usage"`
 	DiskUsage   float64 `json:"disk_usage"`
@@ -46,19 +46,24 @@ type PageData struct {
 	AdminUser  string
 	TOTPSecret string
 	SiteName   string
+	CustomCode string 
+	Favicon    string // [新增] 用于渲染网站图标
 }
 
 type AdminConfig struct {
 	Username      string `json:"username"`
-	PasswordHash  string `json:"password_hash"`  // 存储 Hash 后的密码
-	TOTPEncrypted string `json:"totp_encrypted"` // 存储 AES 加密后的 2FA
+	PasswordHash  string `json:"password_hash"`  
+	TOTPEncrypted string `json:"totp_encrypted"` 
 	SiteName      string `json:"site_name"`
+	CustomCode    string `json:"custom_code"` 
+	Favicon       string `json:"favicon"` // [新增] 存储 Base64 格式的图标数据
 }
 
 type LoginData struct {
 	Error    string
 	Has2FA   bool
 	SiteName string
+	Favicon  string // [新增] 登录页也需要图标
 }
 
 var (
@@ -72,9 +77,7 @@ var (
 	config      AdminConfig
 
 	sessionAuthToken = "TzAdminAuthenticatedTokenSecret_v3"
-	
-	// 系统级 AES 加密密钥 (必须是 32 字节，用于加密 2FA 密钥)
-	aesSecretKey = []byte("TanzhengSafeKey12345678901234567")
+	aesSecretKey     = []byte("TanzhengSafeKey12345678901234567")
 )
 
 // ==========================================
@@ -121,6 +124,8 @@ func loadConfig() {
 			PasswordHash:  hashPassword("admin"), 
 			TOTPEncrypted: "", 
 			SiteName:      "服务器状态监控",
+			CustomCode:    "", 
+			Favicon:       "", // 初始化图标为空
 		}
 		saveConfig()
 	}
@@ -173,6 +178,7 @@ const htmlTemplate = `
 <html>
 <head>
     <title>{{.SiteName}}</title>
+    <link rel="icon" href="{{if .Favicon}}{{.Favicon}}{{else}}data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌍</text></svg>{{end}}">
     <style>
         body { font-family: Arial, sans-serif; background: #f4f6f9; margin: 40px; }
         .header-box { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
@@ -203,18 +209,25 @@ const htmlTemplate = `
         .btn-delete:hover { background-color: #d32f2f; }
         
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; }
-        .modal-content { background: white; padding: 25px; border-radius: 8px; width: 320px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        .modal-content { background: white; padding: 25px; border-radius: 8px; width: 360px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto; }
         .modal-content h3 { margin-top: 0; margin-bottom: 20px; text-align: center; }
-        .modal-content label { display: block; margin-bottom: 5px; font-size: 0.9em; color: #555; }
-        .modal-content input { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-        .modal-content button { width: 100%; padding: 10px; background: #00add8; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }
+        .modal-content label { display: block; margin-bottom: 5px; font-size: 0.9em; color: #555; font-weight: bold; }
+        .modal-content input, .modal-content textarea { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        .modal-content input[type="file"] { padding: 6px; margin-bottom: 5px; }
+        .file-hint { font-size: 0.8em; color: #888; margin-bottom: 15px; }
+        .modal-content textarea { font-family: monospace; font-size: 0.85em; resize: vertical; }
+        .modal-content button { width: 100%; padding: 10px; background: #00add8; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; margin-top: 5px; }
         .modal-content button:hover { background: #008cae; }
         .close-btn { float: right; cursor: pointer; font-size: 1.5em; color: #888; line-height: 0.5; }
     </style>
+    {{safeHTML .CustomCode}}
 </head>
 <body>
     <div class="header-box">
-        <h2>{{.SiteName}}</h2>
+        <h2>
+            {{if .Favicon}}<img src="{{.Favicon}}" style="height: 24px; vertical-align: middle; margin-right: 8px; border-radius: 4px;">{{end}}
+            {{.SiteName}}
+        </h2>
         <div class="header-actions">
             {{if .IsAdmin}} 
                 <button class="action-btn" onclick="copyAllIPs()">📄 复制全部IP</button>
@@ -294,7 +307,15 @@ const htmlTemplate = `
             <input type="password" id="cfgPass" placeholder="留空则保持不变">
             <label>2FA 密钥 (Base32格式)</label>
             <input type="text" id="cfgTOTP" value="{{.TOTPSecret}}" placeholder="留空则禁用 2FA">
-            <button onclick="submitSettings()">保存设置</button>
+            
+            <label>站点图标 (Favicon)</label>
+            <input type="file" id="cfgFavicon" accept="image/png, image/jpeg, image/ico, image/svg+xml, image/gif">
+            <div class="file-hint">支持 jpg/png/ico。不选则保持原样，建议尺寸 64x64。</div>
+
+            <label>自定义代码 (美化CSS / 统计JS)</label>
+            <textarea id="cfgCustomCode" rows="4" placeholder="例如: <style> body { background: #000; } </style>">{{.CustomCode}}</textarea>
+            
+            <button onclick="submitSettingsAsync()">保存设置</button>
         </div>
     </div>
     {{end}}
@@ -314,15 +335,8 @@ const htmlTemplate = `
         function deleteNode(id, name) {
             clearTimeout(refreshTimer);
             if(confirm("确定要删除节点 [" + name + "] 吗？\n(若客户端仍在运行，下次上报时会自动重新添加)")) {
-                fetch('/delete', { 
-                    method: 'POST', 
-                    headers: {'Content-Type': 'application/x-www-form-urlencoded'}, 
-                    body: 'id=' + encodeURIComponent(id) 
-                })
-                .then(res => {
-                    if(res.status === 401) { alert("操作失败：未登录或登录已失效！"); }
-                    window.location.reload();
-                });
+                fetch('/delete', { method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: 'id=' + encodeURIComponent(id) })
+                .then(res => { if(res.status === 401) { alert("操作失败：未登录或登录已失效！"); } window.location.reload(); });
             } else { refreshTimer = setTimeout(() => window.location.reload(), 5000); }
         }
 
@@ -336,28 +350,52 @@ const htmlTemplate = `
         }
 
         {{if .IsAdmin}}
-        function openSettings() {
-            clearTimeout(refreshTimer);
-            document.getElementById('settingsModal').style.display = 'flex';
-        }
+        function openSettings() { clearTimeout(refreshTimer); document.getElementById('settingsModal').style.display = 'flex'; }
+        function closeSettings() { document.getElementById('settingsModal').style.display = 'none'; refreshTimer = setTimeout(() => window.location.reload(), 5000); }
 
-        function closeSettings() {
-            document.getElementById('settingsModal').style.display = 'none';
-            refreshTimer = setTimeout(() => window.location.reload(), 5000);
-        }
-
-        function submitSettings() {
+        // 【新增】异步提交设置，处理图片文件转换
+        async function submitSettingsAsync() {
             let s = document.getElementById('cfgSiteName').value;
             let u = document.getElementById('cfgUser').value;
             let p = document.getElementById('cfgPass').value;
             let t = document.getElementById('cfgTOTP').value;
+            let c = document.getElementById('cfgCustomCode').value;
+
+            // 处理图片上传
+            let fileInput = document.getElementById('cfgFavicon');
+            let favBase64 = "";
+            if (fileInput.files.length > 0) {
+                let file = fileInput.files[0];
+                if (file.size > 500 * 1024) { // 限制 500KB 以内，防止挤爆配置文件
+                    alert("图标文件过大！请选择 500KB 以下的图片文件。");
+                    return;
+                }
+                // 将文件读取为 Base64 数据字符串
+                favBase64 = await new Promise((resolve) => {
+                    let reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsDataURL(file);
+                });
+            }
+
+            // 使用 URLSearchParams 组装参数，自动处理 URL 安全编码
+            let params = new URLSearchParams();
+            params.append('site_name', s);
+            params.append('username', u);
+            params.append('password', p);
+            params.append('totp', t);
+            params.append('custom_code', c);
+            if (favBase64 !== "") {
+                params.append('favicon', favBase64);
+            }
+
             fetch('/update_config', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                body: 'site_name=' + encodeURIComponent(s) + '&username=' + encodeURIComponent(u) + '&password=' + encodeURIComponent(p) + '&totp=' + encodeURIComponent(t)
+                body: params.toString()
             }).then(res => {
                 if(res.ok) {
-                    alert("设置保存成功！配置已安全加密写入文件。");
+                    alert("设置保存成功！");
                     window.location.reload();
                 } else {
                     alert("保存失败，请检查登录状态");
@@ -372,21 +410,10 @@ const htmlTemplate = `
                 let ip = row.getAttribute('data-ip');
                 if(ip && ip !== "") { ips.push(ip); }
             });
-            if(ips.length === 0) {
-                alert("没有找到可复制的 IP");
-                refreshTimer = setTimeout(() => window.location.reload(), 5000);
-                return;
-            }
+            if(ips.length === 0) { alert("没有找到可复制的 IP"); refreshTimer = setTimeout(() => window.location.reload(), 5000); return; }
             let text = ips.join("\n");
-            let textArea = document.createElement("textarea"); textArea.value = text; 
-            textArea.style.position = "fixed"; textArea.style.opacity = "0"; 
-            document.body.appendChild(textArea); textArea.focus(); textArea.select();
-            try { 
-                document.execCommand('copy'); 
-                alert("成功复制 " + ips.length + " 个 IP 地址到剪贴板！\n\n" + text); 
-            } catch (err) { 
-                alert("复制失败"); 
-            }
+            let textArea = document.createElement("textarea"); textArea.value = text; textArea.style.position = "fixed"; textArea.style.opacity = "0"; document.body.appendChild(textArea); textArea.focus(); textArea.select();
+            try { document.execCommand('copy'); alert("成功复制 " + ips.length + " 个 IP 地址！"); } catch (err) { alert("复制失败"); }
             document.body.removeChild(textArea);
             refreshTimer = setTimeout(() => window.location.reload(), 5000);
         }
@@ -395,7 +422,7 @@ const htmlTemplate = `
         document.querySelectorAll('.draggable-row').forEach(row => {
             row.addEventListener('dragstart', function(e) { draggedRow = this; e.dataTransfer.effectAllowed = 'move'; clearTimeout(refreshTimer); setTimeout(() => this.classList.add('dragging'), 0); });
             row.addEventListener('dragend', function() { this.classList.remove('dragging'); let newOrder = Array.from(document.querySelectorAll('.draggable-row')).map(r => r.getAttribute('data-id'));
-                fetch('/update_order', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(newOrder) }).then(res => { if(res.status === 401) { alert("操作失败：未登录！"); } refreshTimer = setTimeout(() => window.location.reload(), 5000); });
+                fetch('/update_order', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(newOrder) }).then(res => { if(res.status === 401) alert("操作失败：未登录！"); refreshTimer = setTimeout(() => window.location.reload(), 5000); });
             });
             row.addEventListener('dragover', function(e) { e.preventDefault(); if (draggedRow === this) return; let bounding = this.getBoundingClientRect(); let offset = e.clientY - bounding.top;
                 if (offset > bounding.height / 2) { this.parentNode.insertBefore(draggedRow, this.nextSibling); } else { this.parentNode.insertBefore(draggedRow, this); }
@@ -414,6 +441,7 @@ const loginTemplate = `
 <html>
 <head>
     <title>管理登录 - {{.SiteName}}</title>
+    <link rel="icon" href="{{if .Favicon}}{{.Favicon}}{{else}}data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌍</text></svg>{{end}}">
     <style>
         body { font-family: Arial, sans-serif; background: #f4f6f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
         .login-card { background: #fff; padding: 35px 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 320px; }
@@ -430,7 +458,10 @@ const loginTemplate = `
 </head>
 <body>
     <div class="login-card">
-        <h3>管理登录</h3>
+        <h3>
+            {{if .Favicon}}<img src="{{.Favicon}}" style="height: 28px; vertical-align: middle; margin-right: 8px; border-radius: 4px;">{{end}}
+            管理登录
+        </h3>
         <form method="POST" action="/login">
             <div class="input-group">
                 <label>用户名</label>
@@ -485,13 +516,15 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	sysPassHash := config.PasswordHash
 	sysTOTPDecrypted := decryptAES(config.TOTPEncrypted)
 	sysName := config.SiteName
+	sysFavicon := config.Favicon
 	mu.Unlock()
 
 	has2FA := sysTOTPDecrypted != ""
 
 	if r.Method == http.MethodGet {
+		// 【智能模板加载】如果存在 theme-login.html，也可以读取外部文件（这里简单处理，只读内置）
 		tmpl, _ := template.New("login").Parse(loginTemplate)
-		tmpl.Execute(w, LoginData{Has2FA: has2FA, SiteName: sysName})
+		tmpl.Execute(w, LoginData{Has2FA: has2FA, SiteName: sysName, Favicon: sysFavicon})
 		return
 	}
 
@@ -506,7 +539,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			if has2FA {
 				if !verifyTOTP(sysTOTPDecrypted, code) {
 					tmpl, _ := template.New("login").Parse(loginTemplate)
-					tmpl.Execute(w, LoginData{Error: "2FA动态验证码错误！", Has2FA: has2FA, SiteName: sysName})
+					tmpl.Execute(w, LoginData{Error: "2FA动态验证码错误！", Has2FA: has2FA, SiteName: sysName, Favicon: sysFavicon})
 					return
 				}
 			}
@@ -515,7 +548,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tmpl, _ := template.New("login").Parse(loginTemplate)
-		tmpl.Execute(w, LoginData{Error: "用户名或密码错误！", Has2FA: has2FA, SiteName: sysName})
+		tmpl.Execute(w, LoginData{Error: "用户名或密码错误！", Has2FA: has2FA, SiteName: sysName, Favicon: sysFavicon})
 	}
 }
 
@@ -534,13 +567,11 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 	if clientIP == "" { clientIP, _, _ = net.SplitHostPort(r.RemoteAddr) }
 	data.IP = clientIP
 
-	// 【新增核心兼容逻辑】：
-	// 如果旧版客户端没有传 IPv4 或 IPv6 字段，则尝试通过连接来源 IP 智能补全
 	if data.IPv4 == "" && data.IPv6 == "" {
 		if strings.Contains(clientIP, ":") {
-			data.IPv6 = clientIP // 有冒号说明是 IPv6
+			data.IPv6 = clientIP
 		} else {
-			data.IPv4 = clientIP // 否则是 IPv4
+			data.IPv4 = clientIP
 		}
 	}
 
@@ -608,6 +639,8 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	newUser := r.FormValue("username")
 	newPass := r.FormValue("password")
 	newTOTP := strings.TrimSpace(r.FormValue("totp"))
+	newCustomCode := r.FormValue("custom_code")
+	newFavicon := r.FormValue("favicon") // 【新增】接收前端传过来的 Base64 图标数据
 
 	mu.Lock()
 	if newSite != "" { config.SiteName = newSite }
@@ -618,6 +651,13 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		config.TOTPEncrypted = encryptAES(newTOTP) 
 	} else {
 		config.TOTPEncrypted = ""
+	}
+	
+	config.CustomCode = newCustomCode
+	
+	// 如果用户上传了新图标才更新，否则保留原有图标
+	if newFavicon != "" {
+		config.Favicon = newFavicon
 	}
 	
 	saveConfig()
@@ -652,6 +692,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	adminUser := config.Username
 	siteName := config.SiteName
 	totpSecretDecrypted := decryptAES(config.TOTPEncrypted)
+	customCode := config.CustomCode
+	sysFavicon := config.Favicon
 	mu.Unlock()
 	
 	pageData := PageData{ 
@@ -660,8 +702,12 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		AdminUser: adminUser,
 		TOTPSecret: totpSecretDecrypted,
 		SiteName: siteName,
+		CustomCode: customCode, 
+		Favicon: sysFavicon, // 将图标传给前端
 	}
-	tmpl, _ := template.New("index").Funcs(template.FuncMap{ 
+	
+	// 初始化模板函数
+	tmpl := template.New("index").Funcs(template.FuncMap{ 
 		"div": func(b uint64) float64 { return float64(b) / 1024 / 1024 }, 
 		"inc": func(i int) int { return i + 1 },
 		"formatUptime": func(u uint64) string {
@@ -673,7 +719,15 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			if hours > 0 { return fmt.Sprintf("%d时 %d分", hours, mins) }
 			return fmt.Sprintf("%d分", mins)
 		},
-	}).Parse(htmlTemplate)
+		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
+	})
+
+	// 【超级智能升级】：优先读取外部 theme.html，如果文件被误删或者不存在，则自动降级使用内置界面！
+	if _, err := os.Stat("theme.html"); err == nil {
+		tmpl, _ = tmpl.ParseFiles("theme.html")
+	} else {
+		tmpl, _ = tmpl.Parse(htmlTemplate)
+	}
 	
 	tmpl.Execute(w, pageData)
 }
