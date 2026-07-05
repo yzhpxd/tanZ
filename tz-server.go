@@ -388,7 +388,7 @@ const htmlTemplate = `
     {{end}}
 
     <script>
-        let refreshTimer = setTimeout(() => window.location.reload(), 5000);
+        let refreshTimer = setTimeout(() => window.location.reload(), 15000);
         
         // [新增] 专门用于彻底暂停刷新的函数
         function killRefresh() {
@@ -401,7 +401,7 @@ const htmlTemplate = `
         // [新增] 恢复定时刷新
         function resumeRefresh() {
             killRefresh();
-            refreshTimer = setTimeout(() => window.location.reload(), 5000);
+            refreshTimer = setTimeout(() => window.location.reload(), 15000);
         }
 
         {{if .IsAdmin}}
