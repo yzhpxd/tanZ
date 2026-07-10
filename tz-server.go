@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -24,20 +25,21 @@ import (
 )
 
 type NodeInfo struct {
-	NodeID      string  `json:"node_id"`
-	DisplayName string  `json:"-"`
-	IP          string  `json:"-"`
-	IPv4        string  `json:"ipv4"`
-	IPv6        string  `json:"ipv6"`
-	CPUUsage    float64 `json:"cpu_usage"`
-	MemUsage    float64 `json:"mem_usage"`
-	DiskUsage   float64 `json:"disk_usage"`
-	NetIn       uint64  `json:"net_in"`
-	NetOut      uint64  `json:"net_out"`
-	Uptime      uint64  `json:"uptime"`
-	Timestamp   int64   `json:"-"`
-	LastSeen    string  `json:"-"`
-	IsOnline    bool    `json:"-"`
+	NodeID          string  `json:"node_id"`
+	DisplayName     string  `json:"-"`
+	IP              string  `json:"-"`
+	IPv4            string  `json:"ipv4"`
+	IPv6            string  `json:"ipv6"`
+	CPUUsage        float64 `json:"cpu_usage"`
+	MemUsage        float64 `json:"mem_usage"`
+	DiskUsage       float64 `json:"disk_usage"`
+	NetIn           uint64  `json:"net_in"`
+	NetOut          uint64  `json:"net_out"`
+	Uptime          uint64  `json:"uptime"`
+	Timestamp       int64   `json:"-"`
+	LastSeen        string  `json:"-"`
+	IsOnline        bool    `json:"-"`
+	NotifiedOffline bool    `json:"-"`
 }
 
 type PageData struct {
@@ -48,6 +50,8 @@ type PageData struct {
 	SiteName   string
 	CustomCode string
 	Favicon    string
+	TGToken    string // TG Bot Token
+	TGChatID   string // TG Chat ID
 }
 
 type AdminConfig struct {
@@ -57,6 +61,8 @@ type AdminConfig struct {
 	SiteName      string `json:"site_name"`
 	CustomCode    string `json:"custom_code"`
 	Favicon       string `json:"favicon"`
+	TGToken       string `json:"tg_token"`   // TG Bot Token
+	TGChatID      string `json:"tg_chat_id"` // TG Chat ID
 }
 
 type LoginData struct {
@@ -83,6 +89,8 @@ var (
 
 	sessionAuthToken string
 	aesSecretKey     []byte
+
+	autoDetectedHost string // [新增] 用于存储自动探测到的当前服务端域名
 )
 
 // ==========================================
@@ -185,6 +193,8 @@ func loadConfig() {
 			SiteName:      "服务器状态监控",
 			CustomCode:    "",
 			Favicon:       "",
+			TGToken:       "",
+			TGChatID:      "",
 		}
 		saveConfig()
 	}
@@ -194,28 +204,36 @@ func loadConfig() {
 }
 
 func saveConfig() { b, _ := json.MarshalIndent(config, "", "  "); os.WriteFile(configFile, b, 0644) }
-func loadNames() { b, err := os.ReadFile(namesFile); if err == nil { json.Unmarshal(b, &customNames) } }
-func saveNames() { b, _ := json.Marshal(customNames); os.WriteFile(namesFile, b, 0644) }
-func loadOrder() { b, err := os.ReadFile(orderFile); if err == nil { json.Unmarshal(b, &nodeOrder) } }
-func saveOrder() { b, _ := json.Marshal(nodeOrder); os.WriteFile(orderFile, b, 0644) }
+func loadNames()  { b, err := os.ReadFile(namesFile); if err == nil { json.Unmarshal(b, &customNames) } }
+func saveNames()  { b, _ := json.Marshal(customNames); os.WriteFile(namesFile, b, 0644) }
+func loadOrder()  { b, err := os.ReadFile(orderFile); if err == nil { json.Unmarshal(b, &nodeOrder) } }
+func saveOrder()  { b, _ := json.Marshal(nodeOrder); os.WriteFile(orderFile, b, 0644) }
 
 func checkAdminAuth(r *http.Request) bool {
 	cookie, err := r.Cookie("admin_session")
-	if err != nil { return false }
+	if err != nil {
+		return false
+	}
 	return cookie.Value == sessionAuthToken
 }
 
 func verifyTOTP(secret string, userCode string) bool {
-	if secret == "" { return true }
+	if secret == "" {
+		return true
+	}
 	secret = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(secret, " ", ""), "=", ""))
 	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
 	if err != nil {
 		key, err = base32.StdEncoding.DecodeString(secret)
-		if err != nil { return false }
+		if err != nil {
+			return false
+		}
 	}
 	t := time.Now().Unix() / 30
 	for i := int64(-1); i <= 1; i++ {
-		if generateTOTP(key, t+i) == userCode { return true }
+		if generateTOTP(key, t+i) == userCode {
+			return true
+		}
 	}
 	return false
 }
@@ -229,6 +247,105 @@ func generateTOTP(key []byte, t int64) string {
 	offset := sum[len(sum)-1] & 0xf
 	value := int64(((int(sum[offset]) & 0x7f) << 24) | ((int(sum[offset+1]) & 0xff) << 16) | ((int(sum[offset+2]) & 0xff) << 8) | (int(sum[offset+3]) & 0xff))
 	return fmt.Sprintf("%06d", value%1000000)
+}
+
+// ==========================================
+// 📡 通知与状态巡检模块
+// ==========================================
+
+// 后台定时检查掉线状态 (15 秒)
+func startOfflineChecker() {
+	ticker := time.NewTicker(15 * time.Second)
+	for range ticker.C {
+		mu.Lock()
+		tgToken := config.TGToken
+		tgChatID := config.TGChatID
+		serverDomain := autoDetectedHost // [新增] 读取自动探测的域名
+		if serverDomain == "" {
+			serverDomain = "Server" // 兜底：如果程序刚启动还没收到任何请求时的默认名字
+		}
+		mu.Unlock()
+
+		if tgToken == "" || tgChatID == "" {
+			continue // 未配置推送时跳过
+		}
+
+		now := time.Now().Unix()
+		mu.Lock()
+		for id, info := range nodesStatus {
+			isOffline := (now - info.Timestamp) > 30
+
+			if isOffline && !info.NotifiedOffline {
+				info.NotifiedOffline = true
+				name := info.DisplayName
+				if name == "" {
+					name = id
+				}
+				// [修改] 使用自动探测的域名
+				msg := fmt.Sprintf("🚨 [%s] 节点掉线: [%s] 已失去连接！\nIP: %s", serverDomain, name, info.IP)
+				go sendNotify(tgToken, tgChatID, msg)
+			} else if !isOffline && info.NotifiedOffline {
+				info.NotifiedOffline = false
+				name := info.DisplayName
+				if name == "" {
+					name = id
+				}
+				// [修改] 使用自动探测的域名
+				msg := fmt.Sprintf("✅ [%s] 节点恢复: [%s] 已重新连接！", serverDomain, name)
+				go sendNotify(tgToken, tgChatID, msg)
+			}
+		}
+		mu.Unlock()
+	}
+}
+
+// 执行 Telegram 通知发送
+func sendNotify(tgToken, tgChatID, msg string) error {
+	// 彻底清理可能的不可见字符（防幽灵空格/回车等）
+	tgToken = strings.TrimSpace(tgToken)
+	tgChatID = strings.TrimSpace(tgChatID)
+	tgChatID = strings.ReplaceAll(tgChatID, "\n", "")
+	tgChatID = strings.ReplaceAll(tgChatID, "\r", "")
+	tgChatID = strings.ReplaceAll(tgChatID, "\t", "")
+
+	if tgToken == "" || tgChatID == "" {
+		return fmt.Errorf("TG 机器人配置不完整")
+	}
+
+	// 改用更稳定的 POST + JSON 请求体方式
+	target := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", tgToken)
+
+	payload := map[string]interface{}{
+		"chat_id": tgChatID,
+		"text":    msg,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("JSON打包失败: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", target, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// 增加超时控制
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("网络请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		// 故意在报错中把 chat_id 用单引号括起来并输出长度，用于抓虫
+		return fmt.Errorf("Telegram API 错误 (状态码: %d): %s\n[Debug] 实际发送的ChatID: '%s' (字符长度:%d)",
+			resp.StatusCode, string(respBody), tgChatID, len(tgChatID))
+	}
+	return nil
 }
 
 // ==========================================
@@ -271,12 +388,12 @@ const htmlTemplate = `
         .btn-delete:hover { background-color: #d32f2f; }
         
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; }
-        .modal-content { background: white; padding: 25px; border-radius: 8px; width: 360px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto; }
+        .modal-content { background: white; padding: 25px; border-radius: 8px; width: 400px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto; }
         .modal-content h3 { margin-top: 0; margin-bottom: 20px; text-align: center; }
         .modal-content label { display: block; margin-bottom: 5px; font-size: 0.9em; color: #555; font-weight: bold; }
         .modal-content input, .modal-content textarea { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
         .modal-content input[type="file"] { padding: 6px; margin-bottom: 5px; }
-        .file-hint { font-size: 0.8em; color: #888; margin-bottom: 15px; }
+        .file-hint { font-size: 0.8em; color: #888; margin-bottom: 15px; line-height: 1.4; }
         .modal-content textarea { font-family: monospace; font-size: 0.85em; resize: vertical; }
         .modal-content button { width: 100%; padding: 10px; background: #00add8; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; margin-top: 5px; }
         .modal-content button:hover { background: #008cae; }
@@ -375,46 +492,60 @@ const htmlTemplate = `
             <label>2FA 密钥 (Base32格式)</label>
             <input type="text" id="cfgTOTP" value="{{.TOTPSecret}}" placeholder="留空则禁用 2FA">
             
+            <hr style="border: 0; border-top: 1px solid #ddd; margin: 20px 0;">
+            <label style="color: #00add8;">🤖 Telegram 提醒 (掉线/恢复通知)</label>
+            <label>Bot Token</label>
+            <input type="text" id="cfgTGToken" value="{{.TGToken}}" placeholder="123456789:ABC-def1234...">
+            <label>Chat ID</label>
+            <input type="text" id="cfgTGChatID" value="{{.TGChatID}}" placeholder="例如: 123456789">
+            
+            <button type="button" onclick="testTGNotify(event)" style="background: #ff9800; margin-bottom: 15px;">🔔 测试 TG 通知</button>
+
+            <hr style="border: 0; border-top: 1px solid #ddd; margin: 20px 0;">
             <label>站点图标 (Favicon)</label>
             <input type="file" id="cfgFavicon" accept="image/png, image/jpeg, image/ico, image/svg+xml, image/gif">
             <div class="file-hint">支持 jpg/png/ico。不选则保持原样，建议尺寸 64x64。</div>
 
             <label>自定义代码 (美化CSS / 统计JS)</label>
-            <textarea id="cfgCustomCode" rows="4" placeholder="例如: <style> body { background: #000; } </style>">{{.CustomCode}}</textarea>
+            <input type="hidden" id="cfgCustomCode" value="{{.CustomCode}}">
+            <textarea id="cfgCustomCodeArea" rows="3" placeholder="例如: <style> body { background: #000; } </style>"></textarea>
             
-            <button onclick="submitSettingsAsync()">保存设置</button>
+            <button onclick="submitSettingsAsync()">保存所有设置</button>
         </div>
     </div>
     {{end}}
 
     <script>
+        {{if .IsAdmin}}
+        document.addEventListener('DOMContentLoaded', () => {
+            const area = document.getElementById('cfgCustomCodeArea');
+            if(area) area.value = ` + "`{{.CustomCode}}`" + `;
+        });
+        {{end}}
+
         let refreshTimer = setTimeout(() => window.location.reload(), 15000);
         
-        // [新增] 专门用于彻底暂停刷新的函数
         function killRefresh() {
             if(refreshTimer) {
                 clearTimeout(refreshTimer);
-                refreshTimer = null; // 确保彻底清空
+                refreshTimer = null; 
             }
         }
 
-        // [新增] 恢复定时刷新
         function resumeRefresh() {
             killRefresh();
             refreshTimer = setTimeout(() => window.location.reload(), 15000);
         }
 
         {{if .IsAdmin}}
-        // [新增] 全选/取消全选 逻辑
         function toggleSelectAll(source) {
-            killRefresh(); // 一旦操作选择框，立刻停止页面刷新！
+            killRefresh(); 
             let checkboxes = document.querySelectorAll('.node-cb');
             checkboxes.forEach(cb => { cb.checked = source.checked; });
         }
 
-        // [新增] 单个复选框点击 逻辑
         function onCheckboxClick() {
-            killRefresh(); // 一旦操作选择框，立刻停止页面刷新！
+            killRefresh(); 
             let allChecked = true;
             document.querySelectorAll('.node-cb').forEach(cb => {
                 if (!cb.checked) allChecked = false;
@@ -422,7 +553,6 @@ const htmlTemplate = `
             document.getElementById('selectAll').checked = allChecked;
         }
 
-        // [新增] 批量删除提交 逻辑
         function batchDelete() {
             killRefresh();
             let selected = [];
@@ -432,7 +562,7 @@ const htmlTemplate = `
 
             if (selected.length === 0) {
                 alert("请先勾选要删除的节点！");
-                resumeRefresh(); // 没选东西的话，提示完恢复自动刷新
+                resumeRefresh(); 
                 return;
             }
 
@@ -446,10 +576,9 @@ const htmlTemplate = `
                     window.location.reload();
                 });
             } else {
-                resumeRefresh(); // 用户点了取消，恢复自动刷新
+                resumeRefresh(); 
             }
         }
-        {{end}}
         
         function renameNode(id, oldName) {
             killRefresh();
@@ -477,16 +606,57 @@ const htmlTemplate = `
             document.body.removeChild(textArea);
         }
 
-        {{if .IsAdmin}}
         function openSettings() { killRefresh(); document.getElementById('settingsModal').style.display = 'flex'; }
         function closeSettings() { document.getElementById('settingsModal').style.display = 'none'; resumeRefresh(); }
+
+        // 新增：测试TG通知逻辑
+        function testTGNotify(event) {
+            let tgToken = document.getElementById('cfgTGToken').value.trim();
+            let tgChatID = document.getElementById('cfgTGChatID').value.trim();
+            
+            if (!tgToken || !tgChatID) {
+                alert("请先填写完整的 Bot Token 和 Chat ID。");
+                return;
+            }
+
+            let btn = event.target;
+            let oldText = btn.innerText;
+            btn.innerText = "正在发送...";
+            btn.disabled = true;
+
+            let params = new URLSearchParams();
+            params.append('tg_token', tgToken);
+            params.append('tg_chat_id', tgChatID);
+
+            fetch('/test_tg', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: params.toString()
+            }).then(async res => {
+                if (res.ok) {
+                    alert("✅ 测试通知发送成功！请检查你的 Telegram 客户端。");
+                } else {
+                    let msg = await res.text();
+                    alert("❌ 发送失败：\n" + msg);
+                }
+            }).catch(err => {
+                alert("❌ 请求出现错误：" + err);
+            }).finally(() => {
+                btn.innerText = oldText;
+                btn.disabled = false;
+            });
+        }
 
         async function submitSettingsAsync() {
             let s = document.getElementById('cfgSiteName').value;
             let u = document.getElementById('cfgUser').value;
             let p = document.getElementById('cfgPass').value;
             let t = document.getElementById('cfgTOTP').value;
-            let c = document.getElementById('cfgCustomCode').value;
+            
+            let tgToken = document.getElementById('cfgTGToken').value;
+            let tgChatID = document.getElementById('cfgTGChatID').value;
+            
+            let c = document.getElementById('cfgCustomCodeArea').value;
 
             let fileInput = document.getElementById('cfgFavicon');
             let favBase64 = "";
@@ -508,6 +678,8 @@ const htmlTemplate = `
             params.append('username', u);
             params.append('password', p);
             params.append('totp', t);
+            params.append('tg_token', tgToken);
+            params.append('tg_chat_id', tgChatID);
             params.append('custom_code', c);
             if (favBase64 !== "") {
                 params.append('favicon', favBase64);
@@ -619,12 +791,16 @@ func main() {
 	loadNames()
 	loadOrder()
 
+	// 启动后台掉线监测守护协程 (15秒)
+	go startOfflineChecker()
+
 	http.HandleFunc("/report", handleReport)
 	http.HandleFunc("/rename", handleRename)
 	http.HandleFunc("/delete", handleDelete)
-	http.HandleFunc("/batch_delete", handleBatchDelete) // [新增] 批量删除接口
+	http.HandleFunc("/batch_delete", handleBatchDelete)
 	http.HandleFunc("/update_order", handleUpdateOrder)
 	http.HandleFunc("/update_config", handleUpdateConfig)
+	http.HandleFunc("/test_tg", handleTestTG) // 测试TG通知的路由
 	http.HandleFunc("/login", handleLogin)
 	http.HandleFunc("/logout", handleLogout)
 	http.HandleFunc("/", handleIndex)
@@ -636,6 +812,41 @@ func main() {
 	if err := http.ListenAndServe(":5001", nil); err != nil {
 		fmt.Printf("启动失败: %v\n", err)
 	}
+}
+
+// 专门处理前端发起的测试 TG 请求
+func handleTestTG(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		return
+	}
+	if !checkAdminAuth(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	tgToken := strings.TrimSpace(r.FormValue("tg_token"))
+	tgChatID := strings.TrimSpace(r.FormValue("tg_chat_id"))
+
+	// [新增] 从当前测试请求中提取域名
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "" {
+		host = "Server"
+	}
+
+	testMsg := fmt.Sprintf("🔔 [%s] 这是一条来自服务器监控面板的 Telegram 测试通知！如果您看到了这条消息，说明自动探测域名功能正常。", host)
+
+	err := sendNotify(tgToken, tgChatID, testMsg)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("发送成功"))
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -688,6 +899,18 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		return
 	}
+
+	// [新增] 自动探测并保存服务端域名 (如果是 "v.666200.xyz:5001" 会自动去掉端口号)
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	mu.Lock()
+	if host != "" {
+		autoDetectedHost = host
+	}
+	mu.Unlock()
+
 	var data NodeInfo
 	json.NewDecoder(r.Body).Decode(&data)
 	data.Timestamp = time.Now().Unix()
@@ -715,7 +938,9 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mu.Lock()
-	if _, exists := nodesStatus[data.NodeID]; !exists {
+	if existData, exists := nodesStatus[data.NodeID]; exists {
+		data.NotifiedOffline = existData.NotifiedOffline
+	} else {
 		found := false
 		for _, id := range nodeOrder {
 			if id == data.NodeID {
@@ -789,7 +1014,6 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// [新增] 专门处理批量删除的后端接口
 func handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		return
@@ -803,14 +1027,13 @@ func handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&ids); err == nil {
 		mu.Lock()
 		for _, id := range ids {
-			delete(nodesStatus, id) // 从内存状态中移除
+			delete(nodesStatus, id)
 			if _, ok := customNames[id]; ok {
-				delete(customNames, id) // 从自定义名称表中移除
+				delete(customNames, id)
 			}
 		}
 		saveNames()
 
-		// 重建排序列表，剔除被删掉的节点
 		newOrder := make([]string, 0)
 		for _, v := range nodeOrder {
 			keep := true
@@ -865,6 +1088,10 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	newUser := r.FormValue("username")
 	newPass := r.FormValue("password")
 	newTOTP := strings.TrimSpace(r.FormValue("totp"))
+
+	newTGToken := strings.TrimSpace(r.FormValue("tg_token"))
+	newTGChatID := strings.TrimSpace(r.FormValue("tg_chat_id"))
+
 	newCustomCode := r.FormValue("custom_code")
 	newFavicon := r.FormValue("favicon")
 
@@ -885,6 +1112,8 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		config.TOTPEncrypted = ""
 	}
 
+	config.TGToken = newTGToken
+	config.TGChatID = newTGChatID
 	config.CustomCode = newCustomCode
 
 	if newFavicon != "" {
@@ -947,6 +1176,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	totpSecretDecrypted := decryptAES(config.TOTPEncrypted)
 	customCode := config.CustomCode
 	sysFavicon := config.Favicon
+	sysTGToken := config.TGToken
+	sysTGChatID := config.TGChatID
 	mu.Unlock()
 
 	pageData := PageData{
@@ -957,6 +1188,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 		SiteName:   siteName,
 		CustomCode: customCode,
 		Favicon:    sysFavicon,
+		TGToken:    sysTGToken,
+		TGChatID:   sysTGChatID,
 	}
 
 	tmpl := template.New("index").Funcs(template.FuncMap{
