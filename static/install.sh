@@ -1,13 +1,25 @@
 #!/bin/bash
 # Tanzheng 探针自动化部署工具
-# 基于 GitHub Releases 发布
+# 基于 GitHub Releases 发布 (自动获取最新版)
 
 exec 0</dev/tty
-VERSION="v.1.0.1"
-BASE_URL="https://github.com/yzhpxd/tanZ/releases/download/$VERSION"
 RED='\033[0;31m'; GREEN='\033[0;32m'; PLAIN='\033[0m'
 
 if [ "$EUID" -ne 0 ]; then echo -e "${RED}请使用 root 权限运行！${PLAIN}"; exit 1; fi
+
+# ==========================================
+# 自动获取 GitHub 最新 Release 版本号
+# ==========================================
+echo -e "${GREEN}[*] 正在连接 GitHub 获取最新版本信息...${PLAIN}"
+VERSION=$(curl -s https://api.github.com/repos/yzhpxd/tanZ/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+
+if [ -z "$VERSION" ]; then
+    echo -e "${RED}[-] 获取最新版本号失败！请检查网络是否通畅或是否触发了 GitHub API 限制。${PLAIN}"
+    exit 1
+fi
+
+echo -e "${GREEN}[+] 成功获取最新版本: ${VERSION}${PLAIN}"
+BASE_URL="https://github.com/yzhpxd/tanZ/releases/download/$VERSION"
 
 echo -e "${GREEN}======================================${PLAIN}"
 echo -e "  Tanzheng 探针自动化部署工具"
