@@ -1,0 +1,436 @@
+<style>
+/* ============================================================
+   tanZ 探针面板 · Pika 风格美化包
+   使用方法: 后台管理 -> 系统设置 -> 自定义代码 (美化CSS / 统计JS)
+            整段粘贴 -> 保存所有设置 -> 刷新页面
+   ============================================================ */
+:root {
+  --brand: #3b82f6;
+  --brand-soft: #eff6ff;
+  --bg: #f3f5f9;
+  --card: #ffffff;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --border: #e8ebf0;
+  --green: #22c55e;
+  --green-soft: #ecfdf5;
+  --green-text: #059669;
+  --red: #ef4444;
+  --red-soft: #fef2f2;
+  --red-text: #dc2626;
+  --radius: 14px;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+}
+
+/* 页面背景: 浅灰底 + 方格纹理 */
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(rgba(59,130,246,.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(59,130,246,.05) 1px, transparent 1px);
+  background-size: 26px 26px;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  margin: 24px 32px 48px;
+}
+
+/* 顶部标题区: 卡片化 + 品牌蓝 Logo */
+.header-box {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 20px;
+  box-shadow: var(--shadow);
+  margin-bottom: 16px;
+}
+.header-box h2 {
+  font-style: italic;
+  font-weight: 800;
+  color: var(--brand);
+  letter-spacing: -0.01em;
+}
+.header-box img { border-radius: 6px; }
+.tz-tagline { display: block; font-size: 12px; font-weight: 400; font-style: normal; color: var(--brand); opacity: .8; margin-top: 2px; }
+.tz-clock { text-align: right; line-height: 1.3; margin-right: 12px; }
+.tz-clock .t { font-size: 15px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.tz-clock .d { font-size: 12px; color: var(--muted); }
+.tz-theme-btn {
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 5px 11px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  transition: all .2s ease;
+}
+.tz-theme-btn:hover { border-color: var(--brand); color: var(--brand); }
+
+/* 统计卡片 */
+.stats-grid { gap: 14px; margin-bottom: 16px; }
+.stat-card {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding: 18px 22px 16px;
+}
+.stat-card:hover { box-shadow: 0 8px 20px rgba(16,24,40,.09); }
+.stat-label { color: var(--muted); font-size: 13px; }
+.stat-value { color: var(--text); font-size: 32px; font-weight: 800; }
+.stat-card-icon { width: 32px; height: 32px; }
+.stat-card-watermark { opacity: .08; }
+
+/* 状态横幅 */
+.tz-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 20px;
+  margin-bottom: 16px;
+}
+.tz-banner .l { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--text); }
+.tz-banner .l b { font-weight: 700; }
+.tz-banner .l span { color: var(--muted); }
+.tz-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; }
+.tz-dot.warn { background: var(--red); }
+.tz-banner .r { font-size: 13px; color: var(--green-text); font-weight: 600; }
+.tz-banner .r span { color: var(--muted); font-weight: 400; margin-left: 10px; }
+
+/* 表格: 卡片化 + 浅灰表头 */
+table {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+}
+thead th {
+  background: #f6f8fa !important;
+  color: var(--muted) !important;
+  font-weight: 600;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border) !important;
+}
+thead th:first-child { border-top-left-radius: 13px; }
+thead th:last-child { border-top-right-radius: 13px; }
+tbody tr:hover { background: #f8fafc; }
+td { border-bottom: 1px solid #f1f3f6; }
+
+/* 进度条: 细 + 圆角 */
+.progress-bg { background: #eef1f5; border-radius: 999px; height: 5px; min-width: 72px; margin-top: 7px; }
+.progress-bar { border-radius: 999px; }
+
+/* 状态徽章 */
+.online {
+  background: var(--green-soft);
+  color: var(--green-text);
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+  display: inline-block;
+}
+.offline {
+  background: var(--red-soft);
+  color: var(--red-text);
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+  display: inline-block;
+}
+
+/* 按钮统一样式 */
+.copy-btn, .action-btn, .btn-delete, .login-btn, .modal-content button { border-radius: 8px; }
+.login-btn { background: var(--brand); }
+.login-btn:hover { background: #2563eb; }
+.login-btn.logout { background: #f1f3f6; color: var(--muted); }
+.login-btn.settings { background: var(--brand); }
+.login-btn.settings:hover { background: #2563eb; }
+.editable { color: var(--brand); border-bottom: 1px dashed var(--brand); }
+.drag-handle:hover { color: var(--brand); }
+.draggable-row.dragging { background-color: var(--brand-soft); }
+
+/* 模态框 */
+.modal-content { border-radius: var(--radius); }
+.modal-content button { background: var(--brand); }
+.modal-content button:hover { background: #2563eb; }
+
+/* ============ 暗色模式 ============ */
+[data-theme="dark"] {
+  --bg: #0f172a;
+  --card: #1e293b;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --border: #334155;
+  --brand-soft: rgba(59,130,246,.15);
+  --green-soft: rgba(34,197,94,.14);
+  --green-text: #4ade80;
+  --red-soft: rgba(239,68,68,.14);
+  --red-text: #f87171;
+}
+[data-theme="dark"] body {
+  background-image:
+    linear-gradient(rgba(148,163,184,.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148,163,184,.05) 1px, transparent 1px);
+}
+[data-theme="dark"] .header-box,
+[data-theme="dark"] .stat-card,
+[data-theme="dark"] .tz-banner,
+[data-theme="dark"] table,
+[data-theme="dark"] .modal-content { background: var(--card); color: var(--text); }
+[data-theme="dark"] thead th { background: #263449 !important; color: var(--muted) !important; }
+[data-theme="dark"] tbody tr:hover { background: #243147; }
+[data-theme="dark"] td { color: #cbd5e1; border-bottom-color: #2a3446; }
+[data-theme="dark"] .val-text { color: #cbd5e1; }
+[data-theme="dark"] .net-rate { color: #e2e8f0; }
+[data-theme="dark"] .net-total { color: #94a3b8; }
+[data-theme="dark"] .net-rows .net-row:nth-child(1) .net-arrow { color: #60a5fa !important; }
+[data-theme="dark"] .net-rows .net-row:nth-child(2) .net-arrow { color: #4ade80 !important; }
+[data-theme="dark"] .seq-num { color: var(--muted); }
+[data-theme="dark"] .progress-bg { background: #334155; }
+[data-theme="dark"] .copy-btn, [data-theme="dark"] .action-btn {
+  background: var(--card);
+  color: #cbd5e1;
+  border-color: var(--border);
+}
+[data-theme="dark"] .tz-theme-btn { background: var(--card); color: #cbd5e1; border-color: var(--border); }
+[data-theme="dark"] .login-btn.logout { background: #334155; color: #cbd5e1; }
+[data-theme="dark"] .modal-content input, [data-theme="dark"] .modal-content textarea {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-color: var(--border);
+}
+[data-theme="dark"] .modal-content label { color: var(--muted); }
+</style>
+
+<script>
+(function () {
+  function inject() {
+    /* 1. 副标语 */
+    var h2 = document.querySelector('.header-box h2');
+    if (h2 && !h2.querySelector('.tz-tagline')) {
+      var tag = document.createElement('span');
+      tag.className = 'tz-tagline';
+      tag.textContent = '服务器探针 · 实时状态';
+      h2.appendChild(tag);
+    }
+
+    /* 2. 时钟 (Asia/Shanghai) */
+    var actions = document.querySelector('.header-actions');
+    if (actions && !document.querySelector('.tz-clock')) {
+      var clock = document.createElement('div');
+      clock.className = 'tz-clock';
+      clock.innerHTML = '<div class="t">--:--:--</div><div class="d">--</div>';
+      actions.insertBefore(clock, actions.firstChild);
+      var tf = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      var df = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+      var upd = function () {
+        var now = new Date();
+        clock.querySelector('.t').textContent = tf.format(now);
+        clock.querySelector('.d').textContent = df.format(now) + ' · Asia/Shanghai';
+      };
+      upd();
+      setInterval(upd, 1000);
+    }
+
+    /* 3. 暗色模式切换 (localStorage 记忆) */
+    var actions2 = document.querySelector('.header-actions');
+    if (actions2 && !document.querySelector('.tz-theme-btn')) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tz-theme-btn';
+      btn.title = '切换深浅色';
+      var saved = localStorage.getItem('tz-theme');
+      if (saved === 'dark') { document.documentElement.setAttribute('data-theme', 'dark'); btn.textContent = '☀'; }
+      else { btn.textContent = '☾'; }
+      btn.addEventListener('click', function () {
+        var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+        if (isDark) {
+          document.documentElement.removeAttribute('data-theme');
+          localStorage.setItem('tz-theme', 'light');
+          btn.textContent = '☾';
+        } else {
+          document.documentElement.setAttribute('data-theme', 'dark');
+          localStorage.setItem('tz-theme', 'dark');
+          btn.textContent = '☀';
+        }
+      });
+      actions2.insertBefore(btn, actions2.firstChild);
+    }
+
+    /* 4. 状态横幅 (读取卡片数值动态生成) */
+    if (!document.querySelector('.tz-banner')) {
+      var vals = document.querySelectorAll('.stat-value');
+      var total = vals[0] ? vals[0].textContent.trim() : '-';
+      var online = vals[1] ? vals[1].textContent.trim() : '-';
+      var offline = vals[2] ? vals[2].textContent.trim() : '-';
+      var grid = document.querySelector('.stats-grid');
+      if (grid) {
+        var banner = document.createElement('div');
+        banner.className = 'tz-banner';
+        var dot = offline === '0' ? 'tz-dot' : 'tz-dot warn';
+        var right = offline === '0' ? '所有设备可达' : offline + ' 台设备离线';
+        banner.innerHTML = '<div class="l"><span class="' + dot + '"></span><b>公开运行状态</b><span>' + online + '/' + total + ' 台设备当前在线</span></div><div class="r">' + right + '<span>数据每 15 秒刷新</span></div>';
+        grid.insertAdjacentElement('afterend', banner);
+      }
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', inject);
+  } else {
+    inject();
+  }
+})();
+</script>
+
+<style>
+/* ============================================================
+   筛选栏 (追加块) - 粘贴在美化包末尾即可，或与美化包整段一起使用
+   ============================================================ */
+.tz-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 10px 16px;
+  margin-bottom: 16px;
+}
+.tz-filter .f-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  margin-right: 6px;
+}
+.tz-filter .f-label svg { width: 14px; height: 14px; }
+.tz-tab {
+  border: 1px solid var(--border);
+  background: #f8fafc;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 4px 13px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.tz-tab:hover { border-color: var(--brand); color: var(--brand); }
+.tz-tab.active {
+  background: var(--brand-soft);
+  border-color: var(--brand);
+  color: var(--brand);
+  font-weight: 600;
+  box-shadow: 0 0 0 3px rgba(59,130,246,.12);
+}
+.tz-tab .n { opacity: .65; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.tz-empty td { text-align: center; padding: 24px; color: var(--muted); }
+[data-theme="dark"] .tz-filter { background: var(--card); }
+[data-theme="dark"] .tz-tab { background: #243147; border-color: var(--border); color: #94a3b8; }
+[data-theme="dark"] .tz-tab:hover { border-color: #60a5fa; color: #93c5fd; }
+[data-theme="dark"] .tz-tab.active { background: rgba(59,130,246,.18); border-color: #60a5fa; color: #93c5fd; }
+</style>
+
+<script>
+(function () {
+  function buildFilter() {
+    var tbody = document.getElementById('table-body');
+    var table = document.querySelector('table');
+    if (!tbody || !table || document.querySelector('.tz-filter')) return;
+
+    /* 分组规则: 按节点名称关键词匹配，按需增删改 */
+    var groups = [
+      { name: 'PVE', match: /pve/i },
+      { name: '云服务器', match: /云|cloud|aliyun|tencent|aws|azure|vps/i },
+      { name: '香港', match: /香港|hong\s?kong|\bhk\b/i }
+    ];
+
+    function rowInfo(tr) {
+      var tds = tr.querySelectorAll('td');
+      var nameEl = tr.querySelector('td.editable') || tds[1];
+      var statusEl = tr.querySelector('.online, .offline');
+      return {
+        name: nameEl ? nameEl.textContent.trim() : '',
+        online: !!(statusEl && statusEl.classList.contains('online'))
+      };
+    }
+
+    var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr.draggable-row'));
+    var counts = { all: rows.length, online: 0, offline: 0 };
+    var groupCounts = groups.map(function () { return 0; });
+    rows.forEach(function (tr) {
+      var info = rowInfo(tr);
+      if (info.online) counts.online++; else counts.offline++;
+      groups.forEach(function (g, i) { if (g.match.test(info.name)) groupCounts[i]++; });
+    });
+
+    var bar = document.createElement('div');
+    bar.className = 'tz-filter';
+    var funnel = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v5l-4 2v-7L3 5z"></path></svg>';
+    var html = '<span class="f-label">' + funnel + '筛选</span>';
+    var tabs = [{ key: 'all', label: '全部', n: counts.all }];
+    tabs.push({ key: 'online', label: '在线', n: counts.online });
+    tabs.push({ key: 'offline', label: '离线', n: counts.offline });
+    groups.forEach(function (g, i) { tabs.push({ key: 'g' + i, label: g.name, n: groupCounts[i] }); });
+    tabs.forEach(function (t) {
+      html += '<button type="button" class="tz-tab' + (t.key === 'all' ? ' active' : '') + '" data-key="' + t.key + '">' + t.label + '<span class="n">' + t.n + '</span></button>';
+    });
+    bar.innerHTML = html;
+    table.parentNode.insertBefore(bar, table);
+
+    /* 空态行 */
+    var empty = document.createElement('tr');
+    empty.className = 'tz-empty';
+    empty.style.display = 'none';
+    var td = document.createElement('td');
+    td.colSpan = rows.length ? rows[0].querySelectorAll('td').length : 12;
+    td.textContent = '该分组暂无设备';
+    empty.appendChild(td);
+    tbody.appendChild(empty);
+
+    function apply(key) {
+      rows.forEach(function (tr) {
+        var info = rowInfo(tr);
+        var show = true;
+        if (key === 'online') show = info.online;
+        else if (key === 'offline') show = !info.online;
+        else if (key.indexOf('g') === 0) {
+          var g = groups[parseInt(key.slice(1), 10)];
+          show = g ? g.match.test(info.name) : true;
+        }
+        tr.style.display = show ? '' : 'none';
+      });
+      var visible = rows.filter(function (tr) { return tr.style.display !== 'none'; }).length;
+      empty.style.display = visible === 0 ? '' : 'none';
+      Array.prototype.forEach.call(bar.querySelectorAll('.tz-tab'), function (b) {
+        b.classList.toggle('active', b.getAttribute('data-key') === key);
+      });
+      localStorage.setItem('tz-filter', key);
+    }
+
+    bar.addEventListener('click', function (e) {
+      var btn = e.target.closest('.tz-tab');
+      if (btn) apply(btn.getAttribute('data-key'));
+    });
+
+    /* 刷新后记住上次筛选 */
+    var saved = localStorage.getItem('tz-filter');
+    if (saved && bar.querySelector('[data-key="' + saved + '"]')) apply(saved);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', buildFilter);
+  } else {
+    buildFilter();
+  }
+})();
+</script>
