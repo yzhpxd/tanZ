@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ import (
 type NodeInfo struct {
 	NodeID          string  `json:"node_id"`
 	DisplayName     string  `json:"-"`
+	Tag             string  `json:"-"` // 分组标签 (由后台设置)
 	IP              string  `json:"-"`
 	IPv4            string  `json:"ipv4"`
 	IPv6            string  `json:"ipv6"`
@@ -35,6 +37,8 @@ type NodeInfo struct {
 	DiskUsage       float64 `json:"disk_usage"`
 	NetIn           uint64  `json:"net_in"`
 	NetOut          uint64  `json:"net_out"`
+	NetInTotal      uint64  `json:"-"` // 服务端累计下行流量 (bytes)
+	NetOutTotal     uint64  `json:"-"` // 服务端累计上行流量 (bytes)
 	Uptime          uint64  `json:"uptime"`
 	Timestamp       int64   `json:"-"`
 	LastSeen        string  `json:"-"`
@@ -42,9 +46,71 @@ type NodeInfo struct {
 	NotifiedOffline bool    `json:"-"`
 }
 
+type TagCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// NodeView 是 /api 接口返回的单台节点视图
+
+type NodeView struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	IP         string  `json:"ip"`
+	IPv4       string  `json:"ipv4"`
+	IPv6       string  `json:"ipv6"`
+	Online     bool    `json:"online"`
+	Uptime     string  `json:"uptime"`
+	CPU        float64 `json:"cpu"`
+	Mem        float64 `json:"mem"`
+	Disk       float64 `json:"disk"`
+	NetInRate  string  `json:"net_in_rate"`
+	NetOutRate string  `json:"net_out_rate"`
+	LastSeen   string  `json:"last_seen"`
+	Tag        string  `json:"tag"`
+}
+
+// DashData 是 /api 接口返回的完整仪表盘数据 (局部刷新用)
+
+type DashData struct {
+	Admin       bool       `json:"admin"`
+	Total       int        `json:"total"`
+	Online      int        `json:"online"`
+	Offline     int        `json:"offline"`
+	NetInRate   string     `json:"net_in_rate"`
+	NetOutRate  string     `json:"net_out_rate"`
+	NetInTotal  string     `json:"net_in_total"`
+	NetOutTotal string     `json:"net_out_total"`
+	Tags        []TagCount `json:"tags"`
+	Nodes       []NodeView `json:"nodes"`
+	GeoTotal    int        `json:"geo_total"`
+	GeoResolved int        `json:"geo_resolved"`
+	GeoError    string     `json:"geo_error"`
+	GeoMiss     []string   `json:"geo_miss"`
+}
+
+type dashSnapshot struct {
+	list        []*NodeInfo
+	total       int
+	online      int
+	netInRate   uint64
+	netOutRate  uint64
+	netInTotal  uint64
+	netOutTotal uint64
+	tags        []TagCount
+}
+
 type PageData struct {
-	Nodes      []*NodeInfo
-	IsAdmin    bool
+	Nodes          []*NodeInfo
+	Tags           []TagCount
+	TotalNodes     int
+	OnlineNodes    int
+	OfflineNodes   int
+	NetInRateStr   string
+	NetOutRateStr  string
+	NetInTotalStr  string
+	NetOutTotalStr string
+	IsAdmin        bool
 	AdminUser  string
 	TOTPSecret string
 	SiteName   string
@@ -77,13 +143,42 @@ type SecretConfig struct {
 	AESKey       string `json:"aes_key"`
 }
 
+// NodeTraffic 记录单个节点的累计流量，用于持久化
+
+type NodeTraffic struct {
+	NetInTotal  uint64 `json:"net_in_total"`
+	NetOutTotal uint64 `json:"net_out_total"`
+}
+
+// IPGroupRule 按 IP 前缀自动分组规则 (ipgroups.json)
+
+type IPGroupRule struct {
+	Name     string   `json:"name"`
+	Prefixes []string `json:"prefixes"`
+}
+
 var (
 	nodesStatus = make(map[string]*NodeInfo)
 	customNames = make(map[string]string)
 	nodeOrder   = make([]string, 0)
+	nodeStats   = make(map[string]*NodeTraffic)
+	nodeTags    = make(map[string]string)
 	mu          sync.Mutex
 	namesFile   = "names.json"
 	orderFile   = "order.json"
+	statsFile   = "stats.json"
+	tagsFile    = "tags.json"
+	ipGroupsFile = "ipgroups.json"
+	ipGroups     []IPGroupRule
+	ipGroupsMod  time.Time
+	ipGeo        = make(map[string]string) // ip -> 国家代码 (ipgeo.json 缓存)
+	ipGeoFile    = "ipgeo.json"
+	geoLastTry   time.Time                 // 上次调用 IP 归属地接口的时间 (失败后退避)
+	geoRefresh   time.Time                 // 上次成功刷新缓存的时间
+	geoTotal     int                       // 最近一次解析请求的 IP 数 (诊断)
+	geoResolved  int                       // 其中成功数 (诊断)
+	geoLastError string                    // 最近一次失败原因 (诊断)
+	geoMiss      []string                  // 最近一次仍未识别的 IP 列表 (诊断)
 	configFile  = "config.json"
 	config      AdminConfig
 
@@ -208,6 +303,335 @@ func loadNames()  { b, err := os.ReadFile(namesFile); if err == nil { json.Unmar
 func saveNames()  { b, _ := json.Marshal(customNames); os.WriteFile(namesFile, b, 0644) }
 func loadOrder()  { b, err := os.ReadFile(orderFile); if err == nil { json.Unmarshal(b, &nodeOrder) } }
 func saveOrder()  { b, _ := json.Marshal(nodeOrder); os.WriteFile(orderFile, b, 0644) }
+func loadStats()  { b, err := os.ReadFile(statsFile); if err == nil { json.Unmarshal(b, &nodeStats) } }
+func saveStats()  { b, _ := json.Marshal(nodeStats); os.WriteFile(statsFile, b, 0644) }
+func loadTags()   { b, err := os.ReadFile(tagsFile); if err == nil { json.Unmarshal(b, &nodeTags) } }
+func saveTags()   { b, _ := json.Marshal(nodeTags); os.WriteFile(tagsFile, b, 0644) }
+
+// loadIPGroupsLocked 热加载 ipgroups.json (文件变更后自动重读), 必须在持有 mu 锁时调用
+func loadIPGroupsLocked() {
+	info, err := os.Stat(ipGroupsFile)
+	if err != nil {
+		return
+	}
+	if !info.ModTime().After(ipGroupsMod) {
+		return
+	}
+	b, err := os.ReadFile(ipGroupsFile)
+	if err != nil {
+		return
+	}
+	// 兼容两种写法: 数组 [ {...} ] 或单个对象 {...}
+	var raw json.RawMessage
+	if json.Unmarshal(b, &raw) != nil {
+		return
+	}
+	var rules []IPGroupRule
+	if err := json.Unmarshal(raw, &rules); err != nil {
+		var one IPGroupRule
+		if err2 := json.Unmarshal(raw, &one); err2 != nil || one.Name == "" {
+			return
+		}
+		rules = []IPGroupRule{one}
+	}
+	ipGroups = rules
+	ipGroupsMod = info.ModTime()
+}
+
+// matchIPGroup 按 IP 前缀匹配自动分组名
+func matchIPGroup(ip string) string {
+	for _, g := range ipGroups {
+		for _, p := range g.Prefixes {
+			if p != "" && strings.HasPrefix(ip, p) {
+				return g.Name
+			}
+		}
+	}
+	return ""
+}
+
+// effectiveTag 手动标签 > IP 前缀规则 > IP 归属地国家 > 名称国家代码
+func effectiveTag(id string, info *NodeInfo) string {
+	if t := nodeTags[id]; t != "" {
+		return t
+	}
+	ip := info.IPv4
+	if ip == "" {
+		ip = info.IP
+	}
+	if g := matchIPGroup(ip); g != "" {
+		return g
+	}
+	if g := geoGroup(ip); g != "" {
+		return g
+	}
+	return nameGroup(info.DisplayName)
+}
+
+// countryCN 常用国家代码 -> 中文名 (未收录的代码直接使用原值)
+var countryCN = map[string]string{
+	"US": "美国", "JP": "日本", "HK": "香港", "SG": "新加坡", "DE": "德国",
+	"FR": "法国", "GB": "英国", "RU": "俄罗斯", "TW": "台湾", "KR": "韩国",
+	"CA": "加拿大", "AU": "澳大利亚", "NL": "荷兰", "IN": "印度", "VN": "越南",
+	"TH": "泰国", "MY": "马来西亚", "ID": "印尼", "PH": "菲律宾", "IT": "意大利",
+	"ES": "西班牙", "PL": "波兰", "SE": "瑞典", "FI": "芬兰", "CH": "瑞士",
+	"BR": "巴西", "MX": "墨西哥", "ZA": "南非", "TR": "土耳其", "AE": "阿联酋",
+	"UA": "乌克兰", "CZ": "捷克", "IE": "爱尔兰", "DK": "丹麦", "NO": "挪威",
+	"AT": "奥地利", "BE": "比利时", "PT": "葡萄牙", "RO": "罗马尼亚", "GR": "希腊",
+	"IL": "以色列", "AR": "阿根廷", "CL": "智利", "NZ": "新西兰", "CN": "中国",
+	"MO": "澳门",
+}
+
+// nameCodeCN 节点名称中的国家代码 -> 中文名 (命名兜底, 如 oracle-jp-win)
+var nameCodeCN = map[string]string{
+	"jp": "日本", "id": "印尼", "us": "美国", "hk": "香港", "sg": "新加坡",
+	"de": "德国", "fr": "法国", "gb": "英国", "kr": "韩国", "tw": "台湾",
+	"ru": "俄罗斯", "ca": "加拿大", "au": "澳大利亚", "nl": "荷兰", "in": "印度",
+	"vn": "越南", "th": "泰国", "my": "马来西亚", "ph": "菲律宾", "br": "巴西",
+	"mx": "墨西哥", "tr": "土耳其", "ae": "阿联酋", "za": "南非", "il": "以色列",
+	"ch": "瑞士", "se": "瑞典", "no": "挪威", "fi": "芬兰", "dk": "丹麦",
+	"pl": "波兰", "cz": "捷克", "it": "意大利", "es": "西班牙", "pt": "葡萄牙",
+	"gr": "希腊", "ie": "爱尔兰", "at": "奥地利", "be": "比利时", "cn": "中国",
+	"mo": "澳门", "ar": "阿根廷", "cl": "智利", "nz": "新西兰", "ua": "乌克兰",
+	"ro": "罗马尼亚", "bg": "保加利亚", "ir": "伊朗", "pk": "巴基斯坦", "bd": "孟加拉",
+}
+
+var nameCodeRe = regexp.MustCompile(`(?i)(^|[^a-z])(jp|id|us|hk|sg|de|fr|gb|kr|tw|ru|ca|au|nl|in|vn|th|my|ph|br|mx|tr|ae|za|il|ch|se|no|fi|dk|pl|cz|it|es|pt|gr|ie|at|be|cn|mo|ar|cl|nz|ua|ro|bg|ir|pk|bd)([^a-z]|$)`)
+
+// nameGroup 从节点名称中提取国家代码作为最后兜底分组
+func nameGroup(name string) string {
+	m := nameCodeRe.FindStringSubmatch(name)
+	if m == nil {
+		return ""
+	}
+	if cn, ok := nameCodeCN[strings.ToLower(m[2])]; ok {
+		return cn
+	}
+	return ""
+}
+
+// geoGroup 返回 IP 归属地分组名
+func geoGroup(ip string) string {
+	if ip == "" {
+		return ""
+	}
+	code, ok := ipGeo[ip]
+	if !ok || code == "" {
+		return ""
+	}
+	if cn, ok := countryCN[code]; ok {
+		return cn
+	}
+	return code
+}
+
+func loadIPGeo() {
+	b, err := os.ReadFile(ipGeoFile)
+	if err == nil {
+		json.Unmarshal(b, &ipGeo)
+	}
+}
+
+func saveIPGeo() {
+	b, _ := json.Marshal(ipGeo)
+	os.WriteFile(ipGeoFile, b, 0644)
+}
+
+// geoBatchIPAPI 批量查询 ip-api.com (免费版 HTTP, 45次/分钟, 100个IP/次)
+func geoBatchIPAPI(need []string) bool {
+	type geoReq struct {
+		Query  string `json:"query"`
+		Fields string `json:"fields"`
+	}
+	req := make([]geoReq, 0, len(need))
+	for _, ip := range need {
+		req = append(req, geoReq{Query: ip, Fields: "status,message,countryCode"})
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return false
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post("http://ip-api.com/batch", "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		mu.Lock()
+		geoLastError = "ip-api.com 不可达: " + err.Error()
+		mu.Unlock()
+		return false
+	}
+	defer resp.Body.Close()
+
+	var results []struct {
+		Status      string `json:"status"`
+		CountryCode string `json:"countryCode"`
+		Query       string `json:"query"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		mu.Lock()
+		geoLastError = "ip-api.com 响应解析失败"
+		mu.Unlock()
+		return false
+	}
+
+	mu.Lock()
+	changed := false
+	for _, r := range results {
+		if r.Status == "success" && r.CountryCode != "" && ipGeo[r.Query] != r.CountryCode {
+			ipGeo[r.Query] = r.CountryCode
+			changed = true
+		}
+	}
+	if changed {
+		saveIPGeo()
+	}
+	geoLastError = ""
+	mu.Unlock()
+	return true
+}
+
+// geoPerIP 单 IP 兜底查询 (urlTmpl 含 {ip} 占位, 并发 4)
+func geoPerIP(urlTmpl string, need []string) {
+	type result struct {
+		ip, code string
+	}
+	results := make(chan result, len(need))
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for _, ip := range need {
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			client := &http.Client{Timeout: 8 * time.Second}
+			resp, err := client.Get(strings.Replace(urlTmpl, "{ip}", ip, 1))
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			var d struct {
+				CountryCode string `json:"country_code"`
+				Country     string `json:"country"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&d) == nil {
+				code := d.CountryCode
+				if code == "" {
+					code = d.Country
+				}
+				if code != "" {
+					results <- result{ip, code}
+				}
+			}
+		}(ip)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	changed := false
+	for r := range results {
+		mu.Lock()
+		if ipGeo[r.ip] != r.code {
+			ipGeo[r.ip] = r.code
+			changed = true
+		}
+		mu.Unlock()
+	}
+	if changed {
+		mu.Lock()
+		saveIPGeo()
+		mu.Unlock()
+	}
+}
+
+// resolveGeo 批量解析未缓存的节点公网 IP (ip-api.com -> api.ip.sb -> ipwhois.app 兜底)
+func resolveGeo() {
+	mu.Lock()
+	now := time.Now()
+	need := make([]string, 0, 16)
+	seen := make(map[string]bool)
+	for _, info := range nodesStatus {
+		ip := info.IPv4
+		if ip == "" {
+			ip = info.IP
+		}
+		if ip == "" || seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		if _, ok := ipGeo[ip]; !ok {
+			need = append(need, ip)
+		}
+	}
+	// 已全部解析且超过 24 小时 -> 全量刷新一次
+	if !geoRefresh.IsZero() && now.Sub(geoRefresh) > 24*time.Hour && len(need) == 0 && len(seen) > 0 {
+		for ip := range seen {
+			need = append(need, ip)
+		}
+	}
+	rateOK := geoLastTry.IsZero() || now.Sub(geoLastTry) > 10*time.Second
+	if rateOK {
+		geoLastTry = now
+	}
+	mu.Unlock()
+
+	if len(need) == 0 || !rateOK {
+		return
+	}
+	if len(need) > 100 {
+		need = need[:100]
+	}
+
+	geoBatchIPAPI(need)
+
+	// 未解析的 IP 依次走 HTTPS 兜底源
+	mu.Lock()
+	var remain []string
+	for _, ip := range need {
+		if _, done := ipGeo[ip]; !done {
+			remain = append(remain, ip)
+		}
+	}
+	mu.Unlock()
+	if len(remain) > 0 {
+		geoPerIP("https://ipwhois.app/json/{ip}", remain)
+		mu.Lock()
+		var remain2 []string
+		for _, ip := range remain {
+			if _, done := ipGeo[ip]; !done {
+				remain2 = append(remain2, ip)
+			}
+		}
+		mu.Unlock()
+		if len(remain2) > 0 {
+			geoPerIP("https://ipinfo.io/{ip}/json", remain2)
+		}
+	}
+
+	mu.Lock()
+	resolved := 0
+	var miss []string
+	for _, ip := range need {
+		if _, done := ipGeo[ip]; done {
+			resolved++
+		} else {
+			miss = append(miss, ip)
+		}
+	}
+	geoTotal = len(need)
+	geoResolved = resolved
+	geoMiss = miss
+	geoRefresh = now
+	if len(need) == resolved {
+		geoLastError = ""
+	}
+	mu.Unlock()
+	if len(miss) > 0 {
+		fmt.Printf("[geo] 解析 %d 个 IP: 成功 %d, 未识别 %d 个: %v\n", len(need), resolved, len(miss), miss)
+	} else {
+		fmt.Printf("[geo] 解析 %d 个 IP: 全部成功\n", len(need))
+	}
+}
 
 func checkAdminAuth(r *http.Request) bool {
 	cookie, err := r.Cookie("admin_session")
@@ -386,7 +810,36 @@ const htmlTemplate = `
         .val-text { font-size: 0.95em; color: #333; }
         .btn-delete { color: white; background-color: #ff5252; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; transition: background 0.2s; font-size: 0.9em; }
         .btn-delete:hover { background-color: #d32f2f; }
-        
+
+        /* 统计概览卡片 */
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
+        .stat-card { position: relative; overflow: hidden; background: #fff; border: 1px solid #edf0f4; border-radius: 10px; padding: 16px 20px 14px; box-shadow: 0 1px 2px rgba(15,23,42,0.05); transition: box-shadow 0.2s ease, transform 0.2s ease; }
+        .stat-card:hover { box-shadow: 0 6px 16px rgba(15,23,42,0.08); transform: translateY(-1px); }
+        .stat-label { font-size: 13px; color: #8a94a6; }
+        .stat-value { margin-top: 5px; font-size: 30px; font-weight: 700; color: #1a2233; line-height: 1.15; font-variant-numeric: tabular-nums; }
+        .stat-value-warn { color: #f44336; }
+        .stat-card-icon { position: absolute; top: 14px; right: 14px; width: 30px; height: 30px; }
+        .stat-card-watermark { position: absolute; right: -12px; bottom: -14px; width: 88px; height: 88px; opacity: 0.07; }
+        .net-rows { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+        .net-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+        .net-rate { display: inline-flex; align-items: center; gap: 5px; font-size: 15px; font-weight: 600; color: #1a2233; font-variant-numeric: tabular-nums; }
+        .net-arrow { width: 14px; height: 14px; }
+        .net-total { font-size: 13px; color: #8a94a6; font-variant-numeric: tabular-nums; }
+        @media (max-width: 960px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 560px) { .stats-grid { grid-template-columns: 1fr; } }
+        @media (prefers-reduced-motion: reduce) { .stat-card { transition: none; } .stat-card:hover { transform: none; } }
+
+        /* 筛选栏与标签 (基础样式, 自定义代码可覆盖) */
+        .tz-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #fff; border: 1px solid #e8ebf0; border-radius: 10px; padding: 10px 16px; margin-bottom: 16px; }
+        .tz-filter .f-label { display: inline-flex; align-items: center; gap: 6px; color: #8a94a6; font-size: 13px; margin-right: 6px; }
+        .tz-filter .f-label svg { width: 14px; height: 14px; }
+        .tz-tab { border: 1px solid #e8ebf0; background: #f8fafc; color: #6b7280; border-radius: 999px; padding: 4px 13px; font-size: 13px; cursor: pointer; transition: all .15s ease; }
+        .tz-tab:hover { border-color: #3b82f6; color: #3b82f6; }
+        .tz-tab.active { background: #eff6ff; border-color: #3b82f6; color: #3b82f6; font-weight: 600; box-shadow: 0 0 0 3px rgba(59,130,246,.12); }
+        .tz-tab .n { opacity: .65; margin-left: 4px; font-variant-numeric: tabular-nums; }
+        .tz-empty td { text-align: center; padding: 24px; color: #8a94a6; }
+        .tz-node-tag { display: inline-block; margin-left: 8px; padding: 1px 8px; font-size: 11px; color: #3b82f6; background: #eff6ff; border-radius: 999px; vertical-align: middle; white-space: nowrap; }
+
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; }
         .modal-content { background: white; padding: 25px; border-radius: 8px; width: 400px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto; }
         .modal-content h3 { margin-top: 0; margin-bottom: 20px; text-align: center; }
@@ -418,6 +871,85 @@ const htmlTemplate = `
             {{end}}
         </div>
     </div>
+
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+        <defs>
+            <symbol id="i-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M3 12h18"></path>
+                <path d="M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9s1.3-6.4 3.8-9z"></path>
+            </symbol>
+            <symbol id="i-online" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M8.5 12.2l2.4 2.4 4.6-5"></path>
+            </symbol>
+            <symbol id="i-offline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M5.6 5.6l12.8 12.8"></path>
+            </symbol>
+            <symbol id="i-network" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 5v14"></path>
+                <path d="M7 9l5-4 5 4"></path>
+                <path d="M7 15l5 4 5-4"></path>
+            </symbol>
+            <symbol id="i-arrow-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 19V5"></path>
+                <path d="M5 12l7-7 7 7"></path>
+            </symbol>
+            <symbol id="i-arrow-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 5v14"></path>
+                <path d="M19 12l-7 7-7-7"></path>
+            </symbol>
+        </defs>
+    </svg>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <svg class="stat-card-icon" style="color:#00add8;"><use href="#i-globe"></use></svg>
+            <svg class="stat-card-watermark" style="color:#00add8;"><use href="#i-globe"></use></svg>
+            <div class="stat-label">设备总数</div>
+            <div class="stat-value">{{.TotalNodes}}</div>
+        </div>
+        <div class="stat-card">
+            <svg class="stat-card-icon" style="color:#4caf50;"><use href="#i-online"></use></svg>
+            <svg class="stat-card-watermark" style="color:#4caf50;"><use href="#i-online"></use></svg>
+            <div class="stat-label">在线设备</div>
+            <div class="stat-value">{{.OnlineNodes}}</div>
+        </div>
+        <div class="stat-card">
+            <svg class="stat-card-icon" style="color:#8a94a6;"><use href="#i-offline"></use></svg>
+            <svg class="stat-card-watermark" style="color:#8a94a6;"><use href="#i-offline"></use></svg>
+            <div class="stat-label">离线设备</div>
+            <div class="stat-value {{if gt .OfflineNodes 0}}stat-value-warn{{end}}">{{.OfflineNodes}}</div>
+        </div>
+        <div class="stat-card">
+            <svg class="stat-card-icon" style="color:#00add8;"><use href="#i-network"></use></svg>
+            <svg class="stat-card-watermark" style="color:#00add8;"><use href="#i-network"></use></svg>
+            <div class="stat-label">网络统计</div>
+            <div class="net-rows">
+                <div class="net-row">
+                    <span class="net-rate"><svg class="net-arrow" style="color:#00add8;"><use href="#i-arrow-up"></use></svg><span class="tz-rate-text">{{.NetOutRateStr}}</span></span>
+                    <span class="net-total">{{.NetOutTotalStr}}</span>
+                </div>
+                <div class="net-row">
+                    <span class="net-rate"><svg class="net-arrow" style="color:#4caf50;"><use href="#i-arrow-down"></use></svg><span class="tz-rate-text">{{.NetInRateStr}}</span></span>
+                    <span class="net-total">{{.NetInTotalStr}}</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="tz-filter">
+        <span class="f-label">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v5l-4 2v-7L3 5z"></path></svg>
+            筛选
+        </span>
+        <button type="button" class="tz-tab active" data-key="all">全部<span class="n">{{len .Nodes}}</span></button>
+        <button type="button" class="tz-tab" data-key="online">在线<span class="n">{{.OnlineNodes}}</span></button>
+        <button type="button" class="tz-tab" data-key="offline">离线<span class="n">{{.OfflineNodes}}</span></button>
+        {{range .Tags}}<button type="button" class="tz-tab" data-key="tag-{{.Name}}">{{.Name}}<span class="n">{{.Count}}</span></button>{{end}}
+    </div>
+
     <table>
         <thead>
             <tr>
@@ -430,14 +962,14 @@ const htmlTemplate = `
                 <th>CPU 使用率</th>
                 <th>内存 使用率</th>
                 <th>磁盘 使用率</th>
-                <th>网络入/出 (MB/s)</th>
+                <th>实时速率 (↓入/↑出)</th>
                 <th>最后更新</th>
                 {{if .IsAdmin}}<th>操作</th>{{end}}
             </tr>
         </thead>
         <tbody id="table-body">
         {{range $index, $info := .Nodes}}
-        <tr class="draggable-row" {{if $.IsAdmin}}draggable="true"{{else}}draggable="false"{{end}} data-id="{{.NodeID}}" data-ip="{{if .IPv4}}{{.IPv4}}{{else}}{{.IP}}{{end}}">
+        <tr class="draggable-row" {{if $.IsAdmin}}draggable="true"{{else}}draggable="false"{{end}} data-id="{{.NodeID}}" data-ip="{{if .IPv4}}{{.IPv4}}{{else}}{{.IP}}{{end}}" data-tag="{{.Tag}}">
             
             {{if $.IsAdmin}}<td style="text-align: center;"><input type="checkbox" class="node-cb" value="{{.NodeID}}" onclick="onCheckboxClick()"></td>{{end}}
             
@@ -445,9 +977,9 @@ const htmlTemplate = `
                 <span class="seq-num">{{inc $index}}</span>
                 {{if $.IsAdmin}}<span class="drag-handle" title="按住拖拽排序">☰</span>{{end}}
             </td>
-            {{if $.IsAdmin}}<td class="editable" onclick="renameNode('{{.NodeID}}', '{{.DisplayName}}')" title="点击修改备注名">{{.DisplayName}}</td>{{else}}<td>{{.DisplayName}}</td>{{end}}
+            {{if $.IsAdmin}}<td class="editable tz-name" onclick="renameNode('{{.NodeID}}', '{{.DisplayName}}')" title="点击修改备注名">{{.DisplayName}}{{if .Tag}} <span class="tz-node-tag">{{.Tag}}</span>{{end}}</td>{{else}}<td class="tz-name">{{.DisplayName}}{{if .Tag}} <span class="tz-node-tag">{{.Tag}}</span>{{end}}</td>{{end}}
             
-            <td style="font-size: 0.95em; color: #444;">
+            <td class="tz-ip" style="font-size: 0.95em; color: #444;">
                 {{if $.IsAdmin}}
                     <div style="display: flex; align-items: center;">
                         <span>{{if .IPv4}}{{.IPv4}}{{else}}{{.IP}}{{end}}</span>
@@ -462,19 +994,21 @@ const htmlTemplate = `
             </td>
 
             <td>{{if .IsOnline}}<span class="online">在线</span>{{else}}<span class="offline">离线</span>{{end}}</td>
-            <td style="font-size: 0.9em; color: #666;">{{formatUptime .Uptime}}</td>
+            <td class="tz-uptime" style="font-size: 0.9em; color: #666;">{{formatUptime .Uptime}}</td>
             <td><div class="val-text">{{printf "%.1f" .CPUUsage}}%</div><div class="progress-bg"><div class="progress-bar" style="width: {{.CPUUsage}}%; background-color: {{if gt .CPUUsage 90.0}}#f44336{{else if gt .CPUUsage 70.0}}#ff9800{{else}}#4caf50{{end}};"></div></div></td>
             <td><div class="val-text">{{printf "%.1f" .MemUsage}}%</div><div class="progress-bg"><div class="progress-bar" style="width: {{.MemUsage}}%; background-color: {{if gt .MemUsage 90.0}}#f44336{{else if gt .MemUsage 70.0}}#ff9800{{else}}#4caf50{{end}};"></div></div></td>
             <td><div class="val-text">{{printf "%.1f" .DiskUsage}}%</div><div class="progress-bg"><div class="progress-bar" style="width: {{.DiskUsage}}%; background-color: {{if gt .DiskUsage 90.0}}#f44336{{else if gt .DiskUsage 80.0}}#ff9800{{else}}#4caf50{{end}};"></div></div></td>
-            <td>{{printf "%.2f" (div .NetIn)}} | {{printf "%.2f" (div .NetOut)}}</td>
-            <td>{{.LastSeen}}</td>
+            <td class="tz-rate">↓ {{formatRate .NetIn}} / ↑ {{formatRate .NetOut}}</td>
+            <td class="tz-seen">{{.LastSeen}}</td>
             {{if $.IsAdmin}}
-            <td>
+            <td class="tz-ops">
+                <button class="action-btn" onclick="tagNode('{{.NodeID}}', '{{.Tag}}')" title="设置分组标签">标签</button>
                 <button class="btn-delete" onclick="deleteNode('{{.NodeID}}', '{{.DisplayName}}')">删除</button>
             </td>
             {{end}}
         </tr>
         {{end}}
+        <tr class="tz-empty" id="tz-empty-row" style="display:none;"><td>该分组暂无设备</td></tr>
         </tbody>
     </table>
 
@@ -523,18 +1057,223 @@ const htmlTemplate = `
         });
         {{end}}
 
-        let refreshTimer = setTimeout(() => window.location.reload(), 15000);
+        let refreshTimer = setInterval(fetchData, 5000);
         
         function killRefresh() {
             if(refreshTimer) {
-                clearTimeout(refreshTimer);
+                clearInterval(refreshTimer);
                 refreshTimer = null; 
             }
         }
 
         function resumeRefresh() {
             killRefresh();
-            refreshTimer = setTimeout(() => window.location.reload(), 15000);
+            refreshTimer = setInterval(fetchData, 5000);
+        }
+
+        // ===== 局部数据刷新: 每 5 秒拉取 /api 原地更新, 不再整页刷新 =====
+        function esc(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+            });
+        }
+        function jsStr(s) { return String(s == null ? '' : s).replace(/['"]/g, ''); }
+        function pctColor(v, warn1, warn2) { return v > warn1 ? '#f44336' : v > warn2 ? '#ff9800' : '#4caf50'; }
+
+        function buildRowHtml(n, admin) {
+            var ipMain = admin ? (n.ipv4 || n.ip || '') : '****';
+            var ipv6 = (admin && n.ipv6) ? '<div style="font-size:12px;color:#888;margin-top:4px;word-break:break-all;">' + esc(n.ipv6) + '</div>' : '';
+            var tagHtml = n.tag ? ' <span class="tz-node-tag">' + esc(n.tag) + '</span>' : '';
+            var cpu = (n.cpu || 0).toFixed(1), mem = (n.mem || 0).toFixed(1), disk = (n.disk || 0).toFixed(1);
+            var cells = '';
+            if (admin) {
+                cells += '<td style="text-align:center;"><input type="checkbox" class="node-cb" value="' + esc(n.id) + '" onclick="onCheckboxClick()"></td>';
+                cells += '<td><span class="seq-num"></span><span class="drag-handle" title="按住拖拽排序">☰</span></td>';
+                cells += '<td class="editable tz-name" onclick="renameNode(\'' + jsStr(n.id) + '\', \'' + jsStr(n.name) + '\')" title="点击修改备注名">' + esc(n.name) + tagHtml + '</td>';
+                cells += '<td class="tz-ip" style="font-size:0.95em;color:#444;"><div style="display:flex;align-items:center;"><span>' + esc(ipMain) + '</span><button class="copy-btn" onclick="copyIP(\'' + jsStr(ipMain) + '\', this)">复制</button></div>' + ipv6 + '</td>';
+            } else {
+                cells += '<td><span class="seq-num"></span></td>';
+                cells += '<td class="tz-name">' + esc(n.name) + tagHtml + '</td>';
+                cells += '<td class="tz-ip" style="font-size:0.95em;color:#444;"><span style="color:#aaa;font-style:italic;">*.*.*.* (登录可见)</span></td>';
+            }
+            cells += '<td>' + (n.online ? '<span class="online">在线</span>' : '<span class="offline">离线</span>') + '</td>';
+            cells += '<td class="tz-uptime" style="font-size:0.9em;color:#666;">' + esc(n.uptime) + '</td>';
+            cells += '<td><div class="val-text">' + cpu + '%</div><div class="progress-bg"><div class="progress-bar" style="width:' + cpu + '%;background-color:' + pctColor(n.cpu, 90, 70) + ';"></div></div></td>';
+            cells += '<td><div class="val-text">' + mem + '%</div><div class="progress-bg"><div class="progress-bar" style="width:' + mem + '%;background-color:' + pctColor(n.mem, 90, 70) + ';"></div></div></td>';
+            cells += '<td><div class="val-text">' + disk + '%</div><div class="progress-bg"><div class="progress-bar" style="width:' + disk + '%;background-color:' + pctColor(n.disk, 90, 80) + ';"></div></div></td>';
+            cells += '<td class="tz-rate">↓ ' + esc(n.net_in_rate) + ' / ↑ ' + esc(n.net_out_rate) + '</td>';
+            cells += '<td class="tz-seen">' + esc(n.last_seen) + '</td>';
+            if (admin) {
+                cells += '<td class="tz-ops"><button class="action-btn" onclick="tagNode(\'' + jsStr(n.id) + '\', \'' + jsStr(n.tag) + '\')" title="设置分组标签">标签</button> <button class="btn-delete" onclick="deleteNode(\'' + jsStr(n.id) + '\', \'' + jsStr(n.name) + '\')">删除</button></td>';
+            }
+            return '<tr class="draggable-row" draggable="' + (admin ? 'true' : 'false') + '" data-id="' + esc(n.id) + '" data-ip="' + esc(ipMain) + '" data-tag="' + esc(n.tag) + '">' + cells + '</tr>';
+        }
+
+        function updateRow(tr, n, admin) {
+            var nameEl = tr.querySelector('.tz-name');
+            if (nameEl) nameEl.innerHTML = esc(n.name) + (n.tag ? ' <span class="tz-node-tag">' + esc(n.tag) + '</span>' : '');
+            if (admin) {
+                var ipEl = tr.querySelector('.tz-ip');
+                if (ipEl) {
+                    var ipMain = n.ipv4 || n.ip || '';
+                    var h = '<div style="display:flex;align-items:center;"><span>' + esc(ipMain) + '</span><button class="copy-btn" onclick="copyIP(\'' + jsStr(ipMain) + '\', this)">复制</button></div>';
+                    if (n.ipv6) h += '<div style="font-size:12px;color:#888;margin-top:4px;word-break:break-all;">' + esc(n.ipv6) + '</div>';
+                    ipEl.innerHTML = h;
+                }
+                var ops = tr.querySelector('.tz-ops');
+                if (ops) ops.innerHTML = '<button class="action-btn" onclick="tagNode(\'' + jsStr(n.id) + '\', \'' + jsStr(n.tag) + '\')" title="设置分组标签">标签</button> <button class="btn-delete" onclick="deleteNode(\'' + jsStr(n.id) + '\', \'' + jsStr(n.name) + '\')">删除</button>';
+            }
+            var st = tr.querySelector('.online, .offline');
+            if (st) { st.className = n.online ? 'online' : 'offline'; st.textContent = n.online ? '在线' : '离线'; }
+            var up = tr.querySelector('.tz-uptime'); if (up) up.textContent = n.uptime;
+            var vals = tr.querySelectorAll('.val-text');
+            var bars = tr.querySelectorAll('.progress-bar');
+            if (vals[0]) vals[0].textContent = (n.cpu || 0).toFixed(1) + '%';
+            if (vals[1]) vals[1].textContent = (n.mem || 0).toFixed(1) + '%';
+            if (vals[2]) vals[2].textContent = (n.disk || 0).toFixed(1) + '%';
+            if (bars[0]) { bars[0].style.width = (n.cpu || 0).toFixed(1) + '%'; bars[0].style.backgroundColor = pctColor(n.cpu, 90, 70); }
+            if (bars[1]) { bars[1].style.width = (n.mem || 0).toFixed(1) + '%'; bars[1].style.backgroundColor = pctColor(n.mem, 90, 70); }
+            if (bars[2]) { bars[2].style.width = (n.disk || 0).toFixed(1) + '%'; bars[2].style.backgroundColor = pctColor(n.disk, 90, 80); }
+            var rt = tr.querySelector('.tz-rate'); if (rt) rt.textContent = '↓ ' + n.net_in_rate + ' / ↑ ' + n.net_out_rate;
+            var sn = tr.querySelector('.tz-seen'); if (sn) sn.textContent = n.last_seen;
+            tr.setAttribute('data-tag', n.tag || '');
+        }
+
+        function applyData(d) {
+            var sv = document.querySelectorAll('.stat-value');
+            if (sv[0]) sv[0].textContent = d.total;
+            if (sv[1]) sv[1].textContent = d.online;
+            if (sv[2]) { sv[2].textContent = d.offline; sv[2].classList.toggle('stat-value-warn', d.offline > 0); }
+            var rates = document.querySelectorAll('.tz-rate-text');
+            if (rates[0]) rates[0].textContent = d.net_out_rate;
+            if (rates[1]) rates[1].textContent = d.net_in_rate;
+            var totals = document.querySelectorAll('.net-total');
+            if (totals[0]) totals[0].textContent = d.net_out_total;
+            if (totals[1]) totals[1].textContent = d.net_in_total;
+
+            var banner = document.querySelector('.tz-banner');
+            if (banner) {
+                var dot = d.offline === 0 ? 'tz-dot' : 'tz-dot warn';
+                var right = d.offline === 0 ? '所有设备可达' : d.offline + ' 台设备离线';
+                banner.innerHTML = '<div class="l"><span class="' + dot + '"></span><b>公开运行状态</b><span>' + d.online + '/' + d.total + ' 台设备当前在线</span></div><div class="r">' + right + '<span>数据每 5 秒刷新</span></div>';
+            }
+
+            syncFilterTabs(d);
+
+            var tbody = document.getElementById('table-body');
+            if (!tbody) return;
+            var rows = {};
+            tbody.querySelectorAll('tr.draggable-row').forEach(function (tr) { rows[tr.getAttribute('data-id')] = tr; });
+            var seen = {};
+            d.nodes.forEach(function (n) {
+                seen[n.id] = true;
+                var tr = rows[n.id];
+                if (tr) {
+                    updateRow(tr, n, d.admin);
+                } else {
+                    var tmp = document.createElement('tbody');
+                    tmp.innerHTML = buildRowHtml(n, d.admin);
+                    var ntr = tmp.firstElementChild;
+                    tbody.insertBefore(ntr, document.getElementById('tz-empty-row'));
+                    rows[n.id] = ntr;
+                }
+            });
+            Object.keys(rows).forEach(function (id) {
+                if (!seen[id] && rows[id].parentNode) rows[id].parentNode.removeChild(rows[id]);
+            });
+            var seq = 1;
+            tbody.querySelectorAll('tr.draggable-row .seq-num').forEach(function (el) { el.textContent = seq++; });
+            reapplyFilter();
+        }
+
+        function syncFilterTabs(d) {
+            var bar = document.querySelector('.tz-filter');
+            if (!bar) return;
+            var want = ['all', 'online', 'offline'];
+            d.tags.forEach(function (t) { want.push('tag-' + t.name); });
+            var cur = [];
+            bar.querySelectorAll('.tz-tab').forEach(function (b) { cur.push(b.getAttribute('data-key')); });
+            if (cur.length !== want.length || cur.some(function (k, i) { return k !== want[i]; })) {
+                var active = null;
+                bar.querySelectorAll('.tz-tab.active').forEach(function (b) { active = b.getAttribute('data-key'); });
+                function tab(key, label, n) {
+                    return '<button type="button" class="tz-tab' + (key === active ? ' active' : '') + '" data-key="' + esc(key) + '">' + esc(label) + '<span class="n">' + n + '</span></button>';
+                }
+                var html = '<span class="f-label">' + bar.querySelector('.f-label').innerHTML + '</span>';
+                html += tab('all', '全部', d.total) + tab('online', '在线', d.online) + tab('offline', '离线', d.offline);
+                d.tags.forEach(function (t) { html += tab('tag-' + t.name, t.name, t.count); });
+                bar.innerHTML = html;
+            } else {
+                var map = { 'all': d.total, 'online': d.online, 'offline': d.offline };
+                d.tags.forEach(function (t) { map['tag-' + t.name] = t.count; });
+                bar.querySelectorAll('.tz-tab').forEach(function (b) {
+                    var n = map[b.getAttribute('data-key')];
+                    if (n !== undefined) b.querySelector('.n').textContent = n;
+                });
+            }
+        }
+
+        function fetchData() {
+            fetch('/api')
+                .then(function (r) { return r.json(); })
+                .then(function (d) { applyData(d); })
+                .catch(function () {});
+        }
+
+        // ===== 分组筛选 (计数由服务端统计, 前端负责过滤) =====
+        function applyFilter(key) {
+            var rows = document.querySelectorAll('#table-body tr.draggable-row');
+            var visible = 0;
+            rows.forEach(function (tr) {
+                var show = true;
+                if (key === 'online') show = !!(tr.querySelector('.online'));
+                else if (key === 'offline') show = !!(tr.querySelector('.offline'));
+                else if (key.indexOf('tag-') === 0) show = (tr.getAttribute('data-tag') || '') === key.slice(4);
+                tr.style.display = show ? '' : 'none';
+                if (show) visible++;
+            });
+            var empty = document.getElementById('tz-empty-row');
+            if (empty) {
+                var firstRow = document.querySelector('#table-body tr.draggable-row');
+                if (firstRow) empty.querySelector('td').colSpan = firstRow.querySelectorAll('td').length;
+                empty.style.display = visible === 0 ? '' : 'none';
+            }
+            document.querySelectorAll('.tz-filter .tz-tab').forEach(function (b) {
+                b.classList.toggle('active', b.getAttribute('data-key') === key);
+            });
+            try { localStorage.setItem('tz-filter', key); } catch (e) {}
+        }
+        function reapplyFilter() {
+            var saved = null;
+            try { saved = localStorage.getItem('tz-filter'); } catch (e) {}
+            var bar = document.querySelector('.tz-filter');
+            if (saved && bar && bar.querySelector('[data-key="' + saved + '"]')) applyFilter(saved);
+        }
+        function initFilter() {
+            var bar = document.querySelector('.tz-filter');
+            if (!bar) return;
+            bar.addEventListener('click', function (e) {
+                var btn = e.target.closest('.tz-tab');
+                if (btn) applyFilter(btn.getAttribute('data-key'));
+            });
+            reapplyFilter();
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initFilter);
+        else initFilter();
+
+        function tagNode(id, oldTag) {
+            killRefresh();
+            var newTag = prompt("请输入分组标签 (如 云服务器 / 香港 / PVE，留空清除):", oldTag);
+            if (newTag !== null) {
+                fetch('/set_tag', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: 'id=' + encodeURIComponent(id) + '&tag=' + encodeURIComponent(newTag.trim())
+                }).then(function (res) {
+                    if (res.status === 401) { alert("未登录或登录已失效！"); }
+                    window.location.reload();
+                });
+            } else { resumeRefresh(); }
         }
 
         {{if .IsAdmin}}
@@ -790,14 +1529,38 @@ func main() {
 	loadConfig()
 	loadNames()
 	loadOrder()
+	loadStats()
+	loadTags()
+	loadIPGeo()
 
 	// 启动后台掉线监测守护协程 (15秒)
 	go startOfflineChecker()
+
+	// 每 60 秒持久化一次累计流量 (stats.json)
+	go func() {
+		for {
+			time.Sleep(60 * time.Second)
+			mu.Lock()
+			saveStats()
+			mu.Unlock()
+		}
+	}()
+
+	// IP 归属地自动识别 (后台批量查询 + 本地缓存, 手动规则与缓存兜底)
+	go func() {
+		time.Sleep(10 * time.Second)
+		for {
+			resolveGeo()
+			time.Sleep(30 * time.Second)
+		}
+	}()
 
 	http.HandleFunc("/report", handleReport)
 	http.HandleFunc("/rename", handleRename)
 	http.HandleFunc("/delete", handleDelete)
 	http.HandleFunc("/batch_delete", handleBatchDelete)
+	http.HandleFunc("/api", handleAPI)
+	http.HandleFunc("/set_tag", handleSetTag)
 	http.HandleFunc("/update_order", handleUpdateOrder)
 	http.HandleFunc("/update_config", handleUpdateConfig)
 	http.HandleFunc("/test_tg", handleTestTG) // 测试TG通知的路由
@@ -808,7 +1571,7 @@ func main() {
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
 
-	fmt.Println("探针主控端已启动，监听端口 :5001 ...")
+	fmt.Println("探针主控端已启动，监听端口 :5001 (支持 IP 归属地自动分组)")
 	if err := http.ListenAndServe(":5001", nil); err != nil {
 		fmt.Printf("启动失败: %v\n", err)
 	}
@@ -940,7 +1703,19 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	if existData, exists := nodesStatus[data.NodeID]; exists {
 		data.NotifiedOffline = existData.NotifiedOffline
+		data.NetInTotal = existData.NetInTotal
+		data.NetOutTotal = existData.NetOutTotal
+		// 按两次上报的时间间隔对速率积分，得到累计流量 (间隔超过 60s 视为断线重连，不累计)
+		dt := data.Timestamp - existData.Timestamp
+		if dt > 0 && dt <= 60 {
+			data.NetInTotal += uint64(float64(data.NetIn) * float64(dt))
+			data.NetOutTotal += uint64(float64(data.NetOut) * float64(dt))
+		}
 	} else {
+		if st, ok := nodeStats[data.NodeID]; ok {
+			data.NetInTotal = st.NetInTotal
+			data.NetOutTotal = st.NetOutTotal
+		}
 		found := false
 		for _, id := range nodeOrder {
 			if id == data.NodeID {
@@ -954,6 +1729,7 @@ func handleReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	nodesStatus[data.NodeID] = &data
+	nodeStats[data.NodeID] = &NodeTraffic{NetInTotal: data.NetInTotal, NetOutTotal: data.NetOutTotal}
 	mu.Unlock()
 
 	w.WriteHeader(http.StatusOK)
@@ -984,6 +1760,30 @@ func handleRename(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func handleSetTag(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		return
+	}
+	if !checkAdminAuth(r) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
+	id := r.FormValue("id")
+	tag := strings.TrimSpace(r.FormValue("tag"))
+	if id != "" {
+		mu.Lock()
+		if tag == "" {
+			delete(nodeTags, id)
+		} else {
+			nodeTags[id] = tag
+		}
+		saveTags()
+		mu.Unlock()
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 func handleDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		return
@@ -997,6 +1797,8 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	if id != "" {
 		mu.Lock()
 		delete(nodesStatus, id)
+		delete(nodeStats, id)
+		delete(nodeTags, id)
 		if _, ok := customNames[id]; ok {
 			delete(customNames, id)
 			saveNames()
@@ -1009,6 +1811,8 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		nodeOrder = newOrder
 		saveOrder()
+		saveStats()
+		saveTags()
 		mu.Unlock()
 	}
 	w.WriteHeader(http.StatusOK)
@@ -1028,6 +1832,8 @@ func handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		for _, id := range ids {
 			delete(nodesStatus, id)
+			delete(nodeStats, id)
+			delete(nodeTags, id)
 			if _, ok := customNames[id]; ok {
 				delete(customNames, id)
 			}
@@ -1049,6 +1855,8 @@ func handleBatchDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		nodeOrder = newOrder
 		saveOrder()
+		saveStats()
+		saveTags()
 		mu.Unlock()
 	}
 	w.WriteHeader(http.StatusOK)
@@ -1126,14 +1934,35 @@ func handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
+// formatRate 把字节/秒格式化为可读速率 (B/s / K/s / M/s)
+func formatRate(b uint64) string {
+	switch {
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f M/s", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f K/s", float64(b)/(1<<10))
+	default:
+		return fmt.Sprintf("%.0f B/s", float64(b))
 	}
+}
 
-	mu.Lock()
-	now := time.Now().Unix()
+// formatBytes 把累计字节数格式化为可读容量 (B / KB / MB / GB)
+func formatBytes(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.2f GB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.2f MB", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.2f KB", float64(b)/(1<<10))
+	default:
+		return fmt.Sprintf("%.0f B", float64(b))
+	}
+}
+
+// buildSnapshot 汇总当前仪表盘数据, 必须在持有 mu 锁时调用
+func buildSnapshot(now int64) *dashSnapshot {
+	loadIPGroupsLocked()
 	var list []*NodeInfo
 	processed := make(map[string]bool)
 
@@ -1149,6 +1978,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			} else {
 				info.DisplayName = id
 			}
+			info.Tag = effectiveTag(id, info)
 			list = append(list, info)
 			processed[id] = true
 		}
@@ -1165,12 +1995,114 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			} else {
 				info.DisplayName = id
 			}
+			info.Tag = effectiveTag(id, info)
 			list = append(list, info)
 			nodeOrder = append(nodeOrder, id)
 			saveOrder()
 		}
 	}
 
+	snap := &dashSnapshot{list: list, total: len(list)}
+	for _, info := range list {
+		if info.IsOnline {
+			snap.online++
+		}
+		snap.netInRate += info.NetIn
+		snap.netOutRate += info.NetOut
+		snap.netInTotal += info.NetInTotal
+		snap.netOutTotal += info.NetOutTotal
+	}
+
+	// 按标签分组统计 (保持首次出现顺序)
+	tagOrder := make([]string, 0)
+	tagSeen := make(map[string]bool)
+	tagCounts := make(map[string]int)
+	for _, info := range list {
+		if info.Tag == "" {
+			continue
+		}
+		if !tagSeen[info.Tag] {
+			tagSeen[info.Tag] = true
+			tagOrder = append(tagOrder, info.Tag)
+		}
+		tagCounts[info.Tag]++
+	}
+	for _, t := range tagOrder {
+		snap.tags = append(snap.tags, TagCount{Name: t, Count: tagCounts[t]})
+	}
+	return snap
+}
+
+// handleAPI 返回仪表盘 JSON 数据, 供前端局部刷新
+func handleAPI(w http.ResponseWriter, r *http.Request) {
+	admin := checkAdminAuth(r)
+	mu.Lock()
+	snap := buildSnapshot(time.Now().Unix())
+	gTotal, gResolved, gErr, gMiss := geoTotal, geoResolved, geoLastError, geoMiss
+	mu.Unlock()
+
+	d := DashData{
+		Admin:       admin,
+		Total:       snap.total,
+		Online:      snap.online,
+		Offline:     snap.total - snap.online,
+		NetInRate:   formatRate(snap.netInRate),
+		NetOutRate:  formatRate(snap.netOutRate),
+		NetInTotal:  formatBytes(snap.netInTotal),
+		NetOutTotal: formatBytes(snap.netOutTotal),
+		Tags:        snap.tags,
+		GeoTotal:    gTotal,
+		GeoResolved: gResolved,
+		GeoError:    gErr,
+		GeoMiss:     gMiss,
+	}
+	for _, info := range snap.list {
+		d.Nodes = append(d.Nodes, NodeView{
+			ID:         info.NodeID,
+			Name:       info.DisplayName,
+			IP:         info.IP,
+			IPv4:       info.IPv4,
+			IPv6:       info.IPv6,
+			Online:     info.IsOnline,
+			Uptime:     formatUptime(info.Uptime),
+			CPU:        info.CPUUsage,
+			Mem:        info.MemUsage,
+			Disk:       info.DiskUsage,
+			NetInRate:  formatRate(info.NetIn),
+			NetOutRate: formatRate(info.NetOut),
+			LastSeen:   info.LastSeen,
+			Tag:        info.Tag,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(d)
+}
+
+// formatUptime 把秒数格式化为可读运行时长
+func formatUptime(u uint64) string {
+	if u == 0 {
+		return "-"
+	}
+	days := u / 86400
+	hours := (u % 86400) / 3600
+	mins := (u % 3600) / 60
+	if days > 0 {
+		return fmt.Sprintf("%d天 %d时 %d分", days, hours, mins)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%d时 %d分", hours, mins)
+	}
+	return fmt.Sprintf("%d分", mins)
+}
+
+func handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	mu.Lock()
+	snap := buildSnapshot(time.Now().Unix())
 	adminUser := config.Username
 	siteName := config.SiteName
 	totpSecretDecrypted := decryptAES(config.TOTPEncrypted)
@@ -1181,8 +2113,16 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	pageData := PageData{
-		Nodes:      list,
-		IsAdmin:    checkAdminAuth(r),
+		Nodes:          snap.list,
+		TotalNodes:     snap.total,
+		OnlineNodes:    snap.online,
+		OfflineNodes:   snap.total - snap.online,
+		NetInRateStr:   formatRate(snap.netInRate),
+		NetOutRateStr:  formatRate(snap.netOutRate),
+		NetInTotalStr:  formatBytes(snap.netInTotal),
+		NetOutTotalStr: formatBytes(snap.netOutTotal),
+		Tags:           snap.tags,
+		IsAdmin:        checkAdminAuth(r),
 		AdminUser:  adminUser,
 		TOTPSecret: totpSecretDecrypted,
 		SiteName:   siteName,
@@ -1193,23 +2133,10 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmpl := template.New("index").Funcs(template.FuncMap{
-		"div": func(b uint64) float64 { return float64(b) / 1024 / 1024 },
-		"inc": func(i int) int { return i + 1 },
-		"formatUptime": func(u uint64) string {
-			if u == 0 {
-				return "-"
-			}
-			days := u / 86400
-			hours := (u % 86400) / 3600
-			mins := (u % 3600) / 60
-			if days > 0 {
-				return fmt.Sprintf("%d天 %d时 %d分", days, hours, mins)
-			}
-			if hours > 0 {
-				return fmt.Sprintf("%d时 %d分", hours, mins)
-			}
-			return fmt.Sprintf("%d分", mins)
-		},
+		"inc":          func(i int) int { return i + 1 },
+		"formatRate":   formatRate,
+		"formatBytes":  formatBytes,
+		"formatUptime": formatUptime,
 		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
 	})
 
